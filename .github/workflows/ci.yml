@@ -37,9 +37,9 @@ jobs:
         run: make vet
 
       - name: Install golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          version: v2.12
           args: ./...
 
       - name: Test
