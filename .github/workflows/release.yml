@@ -1,0 +1,145 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - release
+      - 'release/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  HELM_RELEASE: tronvent
+  HELM_NAMESPACE: tronvent
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - run: go install mvdan.cc/gofumpt@latest
+
+      - run: make tidy
+      - run: make fmt-check
+      - run: make vet
+
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: ./...
+
+      - run: make test
+      - run: make build
+
+  docker:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=
+            type=ref,event=branch
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  deploy:
+    needs: docker
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+
+      - name: Configure kubeconfig
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          if [ -z "$KUBE_CONFIG" ]; then
+            echo "KUBE_CONFIG secret is not set — skipping deploy"
+            exit 0
+          fi
+          mkdir -p "$HOME/.kube"
+          echo "$KUBE_CONFIG" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+
+      - name: Helm upgrade
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+          IMAGE_TAG: ${{ github.sha }}
+          EXISTING_SECRET: ${{ vars.HELM_EXISTING_SECRET }}
+        run: |
+          if [ -z "$KUBE_CONFIG" ]; then
+            echo "Skipping helm deploy (no KUBE_CONFIG)"
+            exit 0
+          fi
+
+          HELM_ARGS=(
+            upgrade --install "$HELM_RELEASE" ./charts/tronvent
+            --namespace "$HELM_NAMESPACE"
+            --create-namespace
+            --wait
+            --timeout 10m
+            --set "image.repository=${REGISTRY}/${IMAGE_NAME}"
+            --set "image.tag=${IMAGE_TAG}"
+          )
+
+          if [ -n "$EXISTING_SECRET" ]; then
+            HELM_ARGS+=(--set "secrets.create=false" --set "secrets.existingSecret=${EXISTING_SECRET}")
+          else
+            HELM_ARGS+=(
+              --set-string "secrets.databaseUrl=${{ secrets.DATABASE_URL }}"
+              --set-string "secrets.tronGridApiKey=${{ secrets.TRONGRID_API_KEY_SCANNER }}"
+              --set-string "secrets.adminApiToken=${{ secrets.ADMIN_API_TOKEN }}"
+              --set-string "secrets.webhookSigningSecret=${{ secrets.WEBHOOK_SIGNING_SECRET }}"
+            )
+          fi
+
+          if [ -n "${{ vars.WEBHOOK_URL }}" ]; then
+            HELM_ARGS+=(--set-string "config.webhookUrl=${{ vars.WEBHOOK_URL }}")
+          fi
+
+          helm "${HELM_ARGS[@]}"
+
+      - name: Helm test
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          if [ -z "$KUBE_CONFIG" ]; then
+            exit 0
+          fi
+          helm test "$HELM_RELEASE" --namespace "$HELM_NAMESPACE" --timeout 5m

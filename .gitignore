@@ -1,0 +1,46 @@
+# Binaries
+/bin/
+/tronvent
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test & coverage
+*.test
+*.out
+coverage.out
+coverage.html
+*.prof
+*.pprof
+
+# Go workspace
+/vendor/
+
+# Air live-reload
+/tmp/
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# IDE & editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Debug
+__debug_bin*
+debug
+debug.test
+
+# Helm packaging
+charts/**/*.tgz

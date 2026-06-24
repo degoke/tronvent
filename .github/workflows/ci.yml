@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - 'release/**'
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install gofumpt
+        run: go install mvdan.cc/gofumpt@latest
+
+      - name: Tidy modules
+        run: make tidy
+
+      - name: Format check
+        run: make fmt-check
+
+      - name: Vet
+        run: make vet
+
+      - name: Install golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: ./...
+
+      - name: Test
+        run: make test
+
+      - name: Build
+        run: make build
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: tronvent-linux-amd64
+          path: bin/tronvent

@@ -1,0 +1,22 @@
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  cmd        = "go build -o ./tmp/tronvent ."
+  bin        = "./tmp/tronvent"
+  full_bin   = "LOG_FORMAT=text LOG_LEVEL=INFO ./tmp/tronvent"
+  include_ext = ["go"]
+  exclude_dir = ["tmp", "vendor", "tron-scanner"]
+  delay      = 500          # ms to wait after a change before rebuilding
+
+[log]
+  time = false
+
+[color]
+  main    = "cyan"
+  watcher = "blue"
+  build   = "yellow"
+  runner  = "green"
+
+[misc]
+  clean_on_exit = true

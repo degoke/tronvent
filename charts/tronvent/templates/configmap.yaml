@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "tronvent.fullname" . }}
+  labels:
+    {{- include "tronvent.labels" . | nindent 4 }}
+data:
+  LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  LOG_FORMAT: {{ .Values.config.logFormat | quote }}
+  HEALTH_PORT: {{ .Values.config.healthPort | quote }}
+  TRONGRID_BASE_URL: {{ .Values.config.tronGridBaseUrl | quote }}
+  TRON_POLL_INTERVAL_MS: {{ .Values.config.pollIntervalMs | quote }}
+  TRON_START_BLOCK: {{ .Values.config.startBlock | quote }}
+  TRON_REQUIRED_CONFIRMATIONS: {{ .Values.config.requiredConfirmations | quote }}
+  TRON_TRC20_EVENT_CONFS: {{ .Values.config.trc20EventConfs | quote }}
+  TRON_TRC20_CURSOR_RETAIN: {{ .Values.config.trc20CursorRetain | quote }}
+  TRON_TRC20_EVENT_RETRIES: {{ .Values.config.trc20EventRetries | quote }}
+  TRON_TRC20_EVENT_RETRY_DELAY_MS: {{ .Values.config.trc20EventRetryDelayMs | quote }}
+  TRON_FETCH_CONCURRENCY: {{ .Values.config.fetchConcurrency | quote }}
+  TRON_HTTP_TIMEOUT_SECONDS: {{ .Values.config.httpTimeoutSeconds | quote }}
+  TRON_RECONCILE_BATCH_SIZE: {{ .Values.config.reconcileBatchSize | quote }}
+  TRON_TRC20_CONTRACTS: {{ .Values.config.trc20Contracts | quote }}
+  WEBHOOK_MAX_ATTEMPTS: {{ .Values.config.webhookMaxAttempts | quote }}
+  WEBHOOK_POLL_INTERVAL_MS: {{ .Values.config.webhookPollIntervalMs | quote }}
+  WEBHOOK_HTTP_TIMEOUT_SECONDS: {{ .Values.config.webhookHttpTimeoutSeconds | quote }}
+  STATE_RESYNC_INTERVAL_SECONDS: {{ .Values.config.stateResyncIntervalSeconds | quote }}
+  {{- if .Values.config.webhookUrl }}
+  WEBHOOK_URL: {{ .Values.config.webhookUrl | quote }}
+  {{- end }}

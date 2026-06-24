@@ -1,0 +1,23 @@
+1. Tronvent is deployed.
+
+   Health: GET /health
+   Metrics: GET /metrics
+   Admin API: /api/v1/* (requires ADMIN_API_TOKEN)
+
+2. Get the application URL:
+{{- if .Values.ingress.enabled }}
+{{- range $host := .Values.ingress.hosts }}
+  {{- range .paths }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ $host.host }}{{ .path }}
+  {{- end }}
+{{- end }}
+{{- else }}
+  kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "tronvent.fullname" . }} 8080:{{ .Values.service.port }}
+  curl http://127.0.0.1:8080/health
+{{- end }}
+
+3. Run database migrations before first deploy:
+   psql "$DATABASE_URL" -f migrations/001_scanner_schema.up.sql
+
+4. Required secrets: DATABASE_URL, TRONGRID_API_KEY_SCANNER
+   Recommended: ADMIN_API_TOKEN, WEBHOOK_SIGNING_SECRET
