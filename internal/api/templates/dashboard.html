@@ -1,0 +1,465 @@
+{{define "login"}}
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tronvent Admin — Login</title>
+  <link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css">
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <style>
+    body { min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+    .login-card { width: 100%; max-width: 24rem; }
+  </style>
+</head>
+<body class="bg-base-300">
+  <div class="card bg-base-100 shadow-xl login-card">
+    <div class="card-body">
+      <h1 class="card-title text-2xl">Tronvent Admin</h1>
+      {{if .Error}}<div class="alert alert-error text-sm">{{.Error}}</div>{{end}}
+      <form method="POST" action="/dashboard/login">
+        <label class="form-control w-full">
+          <span class="label-text">Admin API Token</span>
+          <input type="password" name="token" class="input input-bordered w-full" required autofocus>
+        </label>
+        <button type="submit" class="btn btn-primary w-full mt-4">Sign in</button>
+      </form>
+    </div>
+  </div>
+</body>
+</html>
+{{end}}
+
+{{define "shell"}}
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tronvent Admin</title>
+  <meta name="csrf-token" content="{{.CSRFToken}}">
+  <link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css">
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+  <style>
+    .dash-panel { min-height: 20rem; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 0.85rem; }
+    .stat-value { font-size: 1.5rem; }
+  </style>
+</head>
+<body class="bg-base-300 min-h-screen">
+  <div class="navbar bg-base-100 shadow-md">
+    <div class="flex-1">
+      <span class="text-xl font-bold px-4">Tronvent Admin</span>
+    </div>
+    <div class="flex-none gap-2 px-4">
+      <form method="POST" action="/dashboard/logout" hx-post="/dashboard/logout" hx-swap="none">
+        <button type="submit" class="btn btn-ghost btn-sm">Logout</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="container mx-auto p-4 max-w-6xl">
+    <div role="tablist" class="tabs tabs-boxed mb-4 bg-base-100">
+      <button type="button" role="tab" class="tab tab-active" id="tab-overview"
+              data-url="/dashboard/partial/overview" data-every="every 5s"
+              onclick="activateTab(this)">Overview</button>
+      <button type="button" role="tab" class="tab" id="tab-watchlist"
+              data-url="/dashboard/partial/watchlist/addresses" data-every="every 15s"
+              onclick="activateTab(this)">Watchlist</button>
+      <button type="button" role="tab" class="tab" id="tab-webhooks"
+              data-url="/dashboard/partial/webhooks" data-every="every 15s"
+              onclick="activateTab(this)">Webhooks</button>
+      <button type="button" role="tab" class="tab" id="tab-retries"
+              data-url="/dashboard/partial/retries" data-every="every 15s"
+              onclick="activateTab(this)">Retries</button>
+    </div>
+
+    <div id="tab-panel" class="dash-panel"
+         hx-get="/dashboard/partial/overview"
+         hx-trigger="every 5s"
+         hx-swap="innerHTML">
+      {{.InitialContent}}
+    </div>
+  </div>
+
+  <script>
+    document.body.addEventListener('htmx:configRequest', function(evt) {
+      var meta = document.querySelector('meta[name=csrf-token]');
+      if (meta) evt.detail.headers['X-CSRF-Token'] = meta.content;
+    });
+    document.body.addEventListener('htmx:afterSwap', function(evt) {
+      if (evt.detail.target.id !== 'tab-panel') return;
+      var el = evt.detail.target.querySelector('[data-refresh-url]');
+      if (!el) return;
+      var panel = document.getElementById('tab-panel');
+      var refreshURL = el.getAttribute('data-refresh-url');
+      if (refreshURL && panel.getAttribute('hx-trigger')) {
+        panel.setAttribute('hx-get', refreshURL);
+        htmx.process(panel);
+      }
+    });
+    function activateTab(el) {
+      document.querySelectorAll('[role=tab]').forEach(function(t) { t.classList.remove('tab-active'); });
+      el.classList.add('tab-active');
+      var url = el.getAttribute('data-url');
+      var every = el.getAttribute('data-every') || 'every 15s';
+      var panel = document.getElementById('tab-panel');
+      panel.setAttribute('hx-get', url);
+      panel.setAttribute('hx-trigger', every);
+      htmx.process(panel);
+      htmx.ajax('GET', url, {target: '#tab-panel', swap: 'innerHTML'});
+    }
+  </script>
+</body>
+</html>
+{{end}}
+
+{{define "overview"}}
+<div id="overview-panel">
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+    <div class="stat bg-base-100 rounded-box shadow">
+      <div class="stat-title">Chain Tip</div>
+      <div class="stat-value">{{.Snapshot.CurrentBlock}}</div>
+    </div>
+    <div class="stat bg-base-100 rounded-box shadow">
+      <div class="stat-title">TRX Target</div>
+      <div class="stat-value">{{.Snapshot.TrxTargetBlock}}</div>
+    </div>
+    <div class="stat bg-base-100 rounded-box shadow">
+      <div class="stat-title">TRC20 Target</div>
+      <div class="stat-value">{{.Snapshot.Trc20TargetBlock}}</div>
+    </div>
+    <div class="stat bg-base-100 rounded-box shadow">
+      <div class="stat-title">TRX Lag</div>
+      <div class="stat-value {{if gt .Snapshot.TrxBlocksBehind 0}}text-warning{{end}}">{{.Snapshot.TrxBlocksBehind}}</div>
+      <div class="stat-desc mono">cursor {{.Snapshot.TrxCursor}}</div>
+    </div>
+  </div>
+
+  <div class="grid grid-cols-2 md:grid-cols-3 gap-4 mb-6">
+    <div class="stat bg-base-100 rounded-box shadow">
+      <div class="stat-title">Watched Addresses</div>
+      <div class="stat-value">{{.AddressCount}}</div>
+    </div>
+    <div class="stat bg-base-100 rounded-box shadow">
+      <div class="stat-title">Watched Contracts</div>
+      <div class="stat-value">{{.ContractCount}}</div>
+    </div>
+    <div class="stat bg-base-100 rounded-box shadow">
+      <div class="stat-title">Poll Interval</div>
+      <div class="stat-value text-lg">{{.PollIntervalMs}}ms</div>
+    </div>
+  </div>
+
+  {{if .Snapshot.ContractLags}}
+  <div class="overflow-x-auto bg-base-100 rounded-box shadow">
+    <table class="table table-sm">
+      <thead><tr><th>Contract</th><th>Symbol</th><th>Cursor</th><th>Lag</th></tr></thead>
+      <tbody>
+        {{range .Snapshot.ContractLags}}
+        <tr>
+          <td class="mono">{{.ContractAddress}}</td>
+          <td>{{if .Symbol}}{{.Symbol}}{{else}}—{{end}}</td>
+          <td>{{.Cursor}}</td>
+          <td>{{if gt .BlocksBehind 0}}<span class="text-warning">{{.BlocksBehind}}</span>{{else}}0{{end}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{end}}
+</div>
+{{end}}
+
+{{define "watchlist_addresses"}}
+<div id="watchlist-addresses" data-refresh-url="{{.RefreshURL}}">
+  <div class="flex flex-wrap gap-2 mb-4">
+    <a class="tab tab-active tab-sm" hx-get="/dashboard/partial/watchlist/addresses?status={{.Status}}&search={{.Search}}" hx-target="#tab-panel">Addresses</a>
+    <a class="tab tab-sm" hx-get="/dashboard/partial/watchlist/contracts" hx-target="#tab-panel">Contracts</a>
+  </div>
+
+  <div class="flex flex-wrap gap-2 mb-4">
+    <form class="flex gap-2 flex-1" hx-get="/dashboard/partial/watchlist/addresses" hx-target="#tab-panel">
+      <input type="hidden" name="status" value="{{.Status}}">
+      <input type="text" name="search" value="{{.Search}}" placeholder="Exact address search" class="input input-bordered input-sm flex-1 mono">
+      <button type="submit" class="btn btn-sm">Search</button>
+    </form>
+    <select class="select select-bordered select-sm" name="status"
+            hx-get="/dashboard/partial/watchlist/addresses" hx-target="#tab-panel" hx-include="[name=search]">
+      <option value="" {{if eq .Status ""}}selected{{end}}>All</option>
+      <option value="active" {{if eq .Status "active"}}selected{{end}}>Active</option>
+      <option value="inactive" {{if eq .Status "inactive"}}selected{{end}}>Inactive</option>
+    </select>
+  </div>
+
+  <form class="flex gap-2 mb-4" hx-post="/dashboard/action/watchlist/address/add" hx-target="#tab-panel" hx-swap="innerHTML">
+    <input type="text" name="address" placeholder="Tron address" class="input input-bordered input-sm flex-1 mono" required>
+    <button type="submit" class="btn btn-primary btn-sm">Add Address</button>
+  </form>
+
+  {{if .Flash}}<div class="alert alert-success text-sm mb-4">{{.Flash}}</div>{{end}}
+  {{if .Error}}<div class="alert alert-error text-sm mb-4">{{.Error}}</div>{{end}}
+
+  <div class="overflow-x-auto bg-base-100 rounded-box shadow">
+    <table class="table table-sm">
+      <thead><tr><th>Address</th><th>Status</th><th>Created</th><th></th></tr></thead>
+      <tbody>
+        {{range .Items}}
+        <tr>
+          <td class="mono">{{.Address}}</td>
+          <td><span class="badge badge-sm {{if eq .Status "active"}}badge-success{{else}}badge-ghost{{end}}">{{.Status}}</span></td>
+          <td class="text-xs">{{.CreatedAt}}</td>
+          <td>
+            {{if eq .Status "active"}}
+            <button class="btn btn-ghost btn-xs" hx-post="/dashboard/action/watchlist/address/deactivate" hx-vals='{"address":"{{.Address}}"}' hx-target="#tab-panel">Deactivate</button>
+            {{else}}
+            <button class="btn btn-ghost btn-xs" hx-post="/dashboard/action/watchlist/address/reactivate" hx-vals='{"address":"{{.Address}}"}' hx-target="#tab-panel">Reactivate</button>
+            {{end}}
+          </td>
+        </tr>
+        {{else}}
+        <tr><td colspan="4" class="text-center text-base-content/60">No addresses found</td></tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{if .NextCursor}}
+  <button class="btn btn-sm mt-4" hx-get="/dashboard/partial/watchlist/addresses?status={{.Status}}&search={{.Search}}&cursor={{.NextCursor}}" hx-target="#tab-panel">Load more</button>
+  {{end}}
+</div>
+{{end}}
+
+{{define "watchlist_contracts"}}
+<div id="watchlist-contracts" data-refresh-url="{{.RefreshURL}}">
+  <div class="flex flex-wrap gap-2 mb-4">
+    <a class="tab tab-sm" hx-get="/dashboard/partial/watchlist/addresses" hx-target="#tab-panel">Addresses</a>
+    <a class="tab tab-active tab-sm" hx-get="/dashboard/partial/watchlist/contracts?status={{.Status}}&search={{.Search}}" hx-target="#tab-panel">Contracts</a>
+  </div>
+
+  <div class="flex flex-wrap gap-2 mb-4">
+    <form class="flex gap-2 flex-1" hx-get="/dashboard/partial/watchlist/contracts" hx-target="#tab-panel">
+      <input type="hidden" name="status" value="{{.Status}}">
+      <input type="text" name="search" value="{{.Search}}" placeholder="Exact contract search" class="input input-bordered input-sm flex-1 mono">
+      <button type="submit" class="btn btn-sm">Search</button>
+    </form>
+    <select class="select select-bordered select-sm" name="status"
+            hx-get="/dashboard/partial/watchlist/contracts" hx-target="#tab-panel" hx-include="[name=search]">
+      <option value="" {{if eq .Status ""}}selected{{end}}>All</option>
+      <option value="active" {{if eq .Status "active"}}selected{{end}}>Active</option>
+      <option value="inactive" {{if eq .Status "inactive"}}selected{{end}}>Inactive</option>
+    </select>
+  </div>
+
+  <form class="flex gap-2 mb-4 flex-wrap" hx-post="/dashboard/action/watchlist/contract/add" hx-target="#tab-panel" hx-swap="innerHTML">
+    <input type="text" name="contractAddress" placeholder="Contract address" class="input input-bordered input-sm flex-1 mono" required>
+    <input type="text" name="tokenSymbol" placeholder="Symbol (optional)" class="input input-bordered input-sm w-32">
+    <button type="submit" class="btn btn-primary btn-sm">Add Contract</button>
+  </form>
+
+  {{if .Flash}}<div class="alert alert-success text-sm mb-4">{{.Flash}}</div>{{end}}
+  {{if .Error}}<div class="alert alert-error text-sm mb-4">{{.Error}}</div>{{end}}
+
+  <div class="overflow-x-auto bg-base-100 rounded-box shadow">
+    <table class="table table-sm">
+      <thead><tr><th>Contract</th><th>Symbol</th><th>Status</th><th>Created</th><th></th></tr></thead>
+      <tbody>
+        {{range .Items}}
+        <tr>
+          <td class="mono">{{.ContractAddress}}</td>
+          <td>{{if .TokenSymbol}}{{.TokenSymbol}}{{else}}—{{end}}</td>
+          <td><span class="badge badge-sm {{if eq .Status "active"}}badge-success{{else}}badge-ghost{{end}}">{{.Status}}</span></td>
+          <td class="text-xs">{{.CreatedAt}}</td>
+          <td>
+            {{if eq .Status "active"}}
+            <button class="btn btn-ghost btn-xs" hx-post="/dashboard/action/watchlist/contract/deactivate" hx-vals='{"contractAddress":"{{.ContractAddress}}"}' hx-target="#tab-panel">Deactivate</button>
+            {{else}}
+            <button class="btn btn-ghost btn-xs" hx-post="/dashboard/action/watchlist/contract/reactivate" hx-vals='{"contractAddress":"{{.ContractAddress}}"}' hx-target="#tab-panel">Reactivate</button>
+            {{end}}
+          </td>
+        </tr>
+        {{else}}
+        <tr><td colspan="5" class="text-center text-base-content/60">No contracts found</td></tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{if .NextCursor}}
+  <button class="btn btn-sm mt-4" hx-get="/dashboard/partial/watchlist/contracts?status={{.Status}}&search={{.Search}}&cursor={{.NextCursor}}" hx-target="#tab-panel">Load more</button>
+  {{end}}
+</div>
+{{end}}
+
+{{define "webhooks"}}
+<div id="webhooks-panel">
+  <div class="grid md:grid-cols-2 gap-4 mb-6">
+    <div class="bg-base-100 rounded-box shadow p-4">
+      <h3 class="font-bold mb-2">Webhook Config</h3>
+      {{if .WebhookURL}}
+      <p class="text-sm mono break-all">{{.WebhookURL}}</p>
+      <p class="text-sm mt-1">Active: {{if .WebhookActive}}<span class="text-success">yes</span>{{else}}<span class="text-warning">no</span>{{end}}</p>
+      <p class="text-xs text-base-content/60">Updated {{.WebhookUpdatedAt}}</p>
+      {{else}}
+      <p class="text-base-content/60">Not configured</p>
+      {{end}}
+    </div>
+
+    <div class="bg-base-100 rounded-box shadow p-4">
+      <h3 class="font-bold mb-2">Settings</h3>
+      <form hx-post="/dashboard/action/webhook/settings" hx-target="#tab-panel" hx-swap="innerHTML">
+        <label class="form-control mb-2">
+          <span class="label-text text-xs">Webhook URL</span>
+          <input type="url" name="webhookUrl" value="{{.WebhookURL}}" class="input input-bordered input-sm w-full" required>
+        </label>
+        <label class="form-control mb-2">
+          <span class="label-text text-xs">Signing Secret (leave blank to keep current)</span>
+          <input type="password" name="signingSecret" class="input input-bordered input-sm w-full" placeholder="••••••••">
+        </label>
+        <label class="label cursor-pointer justify-start gap-2 mb-2">
+          <input type="checkbox" name="isActive" class="checkbox checkbox-sm" {{if .WebhookActive}}checked{{end}}>
+          <span class="label-text">Active</span>
+        </label>
+        <button type="submit" class="btn btn-primary btn-sm">Save</button>
+      </form>
+    </div>
+  </div>
+
+  {{if .Flash}}<div class="alert alert-success text-sm mb-4">{{.Flash}}</div>{{end}}
+  {{if .Error}}<div class="alert alert-error text-sm mb-4">{{.Error}}</div>{{end}}
+
+  <div class="flex flex-wrap gap-2 mb-4 items-center">
+    <h3 class="font-bold flex-1">Recent Events</h3>
+    <select class="select select-bordered select-sm" name="status"
+            hx-get="/dashboard/partial/webhooks" hx-target="#tab-panel" hx-include="[name=selectedEvent]">
+      <option value="" {{if eq .EventStatus ""}}selected{{end}}>All statuses</option>
+      <option value="pending" {{if eq .EventStatus "pending"}}selected{{end}}>Pending</option>
+      <option value="delivering" {{if eq .EventStatus "delivering"}}selected{{end}}>Delivering</option>
+      <option value="delivered" {{if eq .EventStatus "delivered"}}selected{{end}}>Delivered</option>
+      <option value="failed" {{if eq .EventStatus "failed"}}selected{{end}}>Failed</option>
+      <option value="dead" {{if eq .EventStatus "dead"}}selected{{end}}>Dead</option>
+    </select>
+    <button class="btn btn-sm btn-warning" hx-post="/dashboard/action/webhook/retry-all" hx-target="#tab-panel">Retry all failed/dead</button>
+  </div>
+
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="overflow-x-auto bg-base-100 rounded-box shadow">
+      <table class="table table-sm">
+        <thead><tr><th>Scope</th><th>Tx</th><th>Status</th><th>Attempts</th><th></th></tr></thead>
+        <tbody>
+          {{range .Events}}
+          <tr class="{{if eq $.SelectedEventID .ID}}bg-base-200{{end}}">
+            <td class="mono text-xs">{{.Scope}}</td>
+            <td class="mono text-xs truncate max-w-[8rem]" title="{{.TxHash}}">{{.TxHash}}</td>
+            <td><span class="badge badge-sm">{{.Status}}</span></td>
+            <td>{{.AttemptCount}}</td>
+            <td class="flex gap-1">
+              <button class="btn btn-ghost btn-xs" hx-get="/dashboard/partial/webhooks?status={{ $.EventStatus }}&event={{.ID}}" hx-target="#tab-panel">History</button>
+              {{if or (eq .Status "failed") (eq .Status "dead")}}
+              <button class="btn btn-ghost btn-xs" hx-post="/dashboard/action/webhook/retry/{{.ID}}" hx-target="#tab-panel">Retry</button>
+              {{end}}
+            </td>
+          </tr>
+          {{else}}
+          <tr><td colspan="5" class="text-center text-base-content/60">No events</td></tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="bg-base-100 rounded-box shadow p-4">
+      <h4 class="font-bold mb-2">Delivery Attempts</h4>
+      {{if .SelectedEventID}}
+      <div hx-get="/dashboard/partial/webhooks/{{.SelectedEventID}}/attempts" hx-trigger="load, every 15s" hx-swap="innerHTML">
+        <span class="loading loading-spinner loading-sm"></span>
+      </div>
+      {{else}}
+      <p class="text-base-content/60 text-sm">Select an event to view attempt history</p>
+      {{end}}
+    </div>
+  </div>
+</div>
+{{end}}
+
+{{define "webhook_attempts"}}
+<div id="webhook-attempts">
+  {{if .Attempts}}
+  <table class="table table-xs">
+    <thead><tr><th>#</th><th>Code</th><th>Error</th><th>Duration</th><th>Time</th></tr></thead>
+    <tbody>
+      {{range .Attempts}}
+      <tr>
+        <td>{{.AttemptNumber}}</td>
+        <td>{{if .ResponseCode}}{{.ResponseCode}}{{else}}—{{end}}</td>
+        <td class="truncate max-w-[10rem]" title="{{.ErrorMessage}}">{{if .ErrorMessage}}{{.ErrorMessage}}{{else}}—{{end}}</td>
+        <td>{{if .DurationMs}}{{.DurationMs}}ms{{else}}—{{end}}</td>
+        <td class="text-xs">{{.CreatedAt}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="text-base-content/60 text-sm">No delivery attempts recorded</p>
+  {{end}}
+</div>
+{{end}}
+
+{{define "retries"}}
+<div id="retries-panel">
+  <div class="grid md:grid-cols-2 gap-4 mb-6">
+    <div class="bg-base-100 rounded-box shadow p-4">
+      <h3 class="font-bold mb-2">Replay Single Block</h3>
+      <form class="flex gap-2" hx-post="/dashboard/action/retries/block" hx-target="#tab-panel" hx-swap="innerHTML">
+        <input type="number" name="blockNumber" class="input input-bordered input-sm flex-1" placeholder="Block number" required min="1">
+        <button type="submit" class="btn btn-primary btn-sm">Enqueue</button>
+      </form>
+    </div>
+    <div class="bg-base-100 rounded-box shadow p-4">
+      <h3 class="font-bold mb-2">Replay Block Range</h3>
+      <form class="flex gap-2 flex-wrap" hx-post="/dashboard/action/retries/range" hx-target="#tab-panel" hx-swap="innerHTML">
+        <input type="number" name="fromBlock" class="input input-bordered input-sm" placeholder="From" required min="1">
+        <input type="number" name="toBlock" class="input input-bordered input-sm" placeholder="To" required min="1">
+        <button type="submit" class="btn btn-primary btn-sm">Enqueue</button>
+      </form>
+    </div>
+  </div>
+
+  {{if .Flash}}<div class="alert alert-success text-sm mb-4">{{.Flash}}</div>{{end}}
+  {{if .Error}}<div class="alert alert-error text-sm mb-4">{{.Error}}</div>{{end}}
+
+  <div class="flex gap-2 mb-4 items-center">
+    <h3 class="font-bold flex-1">Queue Jobs</h3>
+    <select class="select select-bordered select-sm" name="status"
+            hx-get="/dashboard/partial/retries" hx-target="#tab-panel">
+      <option value="" {{if eq .StatusFilter ""}}selected{{end}}>Pending / Running</option>
+      <option value="pending" {{if eq .StatusFilter "pending"}}selected{{end}}>Pending</option>
+      <option value="running" {{if eq .StatusFilter "running"}}selected{{end}}>Running</option>
+      <option value="failed" {{if eq .StatusFilter "failed"}}selected{{end}}>Failed</option>
+      <option value="dead" {{if eq .StatusFilter "dead"}}selected{{end}}>Dead</option>
+      <option value="completed" {{if eq .StatusFilter "completed"}}selected{{end}}>Completed</option>
+      <option value="all" {{if eq .StatusFilter "all"}}selected{{end}}>All</option>
+    </select>
+  </div>
+
+  <div class="overflow-x-auto bg-base-100 rounded-box shadow">
+    <table class="table table-sm">
+      <thead><tr><th>Queue</th><th>Range</th><th>Status</th><th>Attempts</th><th>Last Error</th><th>Created</th><th>Updated</th><th>Completed</th></tr></thead>
+      <tbody>
+        {{range .Jobs}}
+        <tr>
+          <td class="text-xs">{{.Queue}}</td>
+          <td class="mono">{{.FromBlock}}–{{.ToBlock}}</td>
+          <td><span class="badge badge-sm">{{.Status}}</span></td>
+          <td>{{.Attempts}}/{{.MaxAttempts}}</td>
+          <td class="text-xs truncate max-w-[12rem]" title="{{.LastError}}">{{if .LastError}}{{.LastError}}{{else}}—{{end}}</td>
+          <td class="text-xs">{{.CreatedAt}}</td>
+          <td class="text-xs">{{.UpdatedAt}}</td>
+          <td class="text-xs">{{if .CompletedAt}}{{.CompletedAt}}{{else}}—{{end}}</td>
+        </tr>
+        {{else}}
+        <tr><td colspan="8" class="text-center text-base-content/60">No jobs found</td></tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+</div>
+{{end}}

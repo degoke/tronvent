@@ -80,6 +80,15 @@ func sanitizeDSN(raw string) string {
 	return raw[:schemeEnd+3] + userinfo[:colon+1] + encoded + raw[at:]
 }
 
+// DatabaseURL returns DATABASE_URL with password characters sanitized for pgx.
+func DatabaseURL() (string, error) {
+	raw := os.Getenv("DATABASE_URL")
+	if raw == "" {
+		return "", fmt.Errorf("required environment variable %q is not set", "DATABASE_URL")
+	}
+	return sanitizeDSN(raw), nil
+}
+
 // Load reads environment variables and returns a populated Config.
 func Load() (cfg *Config, err error) {
 	defer func() {
@@ -88,8 +97,13 @@ func Load() (cfg *Config, err error) {
 		}
 	}()
 
+	dsn, err := DatabaseURL()
+	if err != nil {
+		return nil, err
+	}
+
 	c := &Config{
-		DatabaseURL:                sanitizeDSN(mustEnv("DATABASE_URL")),
+		DatabaseURL:                dsn,
 		TronGridBaseURL:            envOrDefault("TRONGRID_BASE_URL", "https://api.trongrid.io"),
 		TronGridAPIKey:             mustEnv("TRONGRID_API_KEY_SCANNER"),
 		PollIntervalMs:             envInt64OrDefault("TRON_POLL_INTERVAL_MS", 3000),

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"log/slog"
 	"net"
 	"net/http"
@@ -21,23 +22,31 @@ import (
 type DB interface {
 	AddWatchedAddress(ctx context.Context, address, source string) (internaldb.WatchedAddress, bool, error)
 	DeactivateWatchedAddress(ctx context.Context, address string) (internaldb.WatchedAddress, error)
-	ListAddresses(ctx context.Context, status string, limit int, afterAddress string) ([]internaldb.WatchedAddress, error)
+	ListAddresses(ctx context.Context, status string, limit int, afterAddress, search string) ([]internaldb.WatchedAddress, error)
 	AddWatchedContract(ctx context.Context, contractAddress, tokenSymbol, source string) (internaldb.WatchedContract, bool, error)
 	DeactivateWatchedContract(ctx context.Context, contractAddress string) (internaldb.WatchedContract, error)
-	ListContracts(ctx context.Context, status string, limit int, afterContract string) ([]internaldb.WatchedContract, error)
+	ListContracts(ctx context.Context, status string, limit int, afterContract, search string) ([]internaldb.WatchedContract, error)
 	UpsertWebhookConfig(ctx context.Context, webhookURL, signingSecret string, isActive bool, source string) (*internaldb.WebhookConfig, error)
+	UpsertWebhookConfigPreserveSecret(ctx context.Context, webhookURL, signingSecret string, isActive bool, source string) (*internaldb.WebhookConfig, error)
 	ListCursors(ctx context.Context) ([]internaldb.CursorRow, error)
 	EnqueueRetryJob(ctx context.Context, fromBlock, toBlock int64) (internaldb.EnqueueRetryResult, error)
 	ListRetryJobs(ctx context.Context, status string, limit int) ([]internaldb.RetryJobRecord, error)
+	ListWebhookEvents(ctx context.Context, status string, limit int) ([]internaldb.DashboardWebhookEvent, error)
+	ListWebhookDeliveryAttempts(ctx context.Context, eventID string) ([]internaldb.DashboardDeliveryAttempt, error)
+	RetryWebhookEvent(ctx context.Context, eventID string) error
+	RetryAllFailedDeadWebhookEvents(ctx context.Context) (int64, error)
+	ListQueueJobs(ctx context.Context, queues []string, statusFilter string, limit int) ([]internaldb.DashboardQueueJob, error)
 }
 
-// Server exposes health, metrics, and admin API endpoints.
+// Server exposes health, metrics, admin API, and dashboard endpoints.
 type Server struct {
 	cfg           *config.Config
 	db            DB
 	addresses     *store.AddressStore
 	contracts     *store.ContractStore
 	webhookConfig *store.WebhookConfigStore
+	chainTip      ChainTipProvider
+	templates     *template.Template
 	srv           *http.Server
 }
 
@@ -48,6 +57,7 @@ func New(
 	addresses *store.AddressStore,
 	contracts *store.ContractStore,
 	webhookConfig *store.WebhookConfigStore,
+	chainTip ChainTipProvider,
 ) *Server {
 	s := &Server{
 		cfg:           cfg,
@@ -55,7 +65,12 @@ func New(
 		addresses:     addresses,
 		contracts:     contracts,
 		webhookConfig: webhookConfig,
+		chainTip:      chainTip,
 	}
+	if err := s.initTemplates(); err != nil {
+		slog.Error("failed to load dashboard templates", "err", err)
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.Handle("/metrics", promhttp.Handler())
@@ -71,6 +86,28 @@ func New(
 	mux.HandleFunc("POST /api/v1/retries/block", s.requireAuth(s.handlePostRetryBlock))
 	mux.HandleFunc("POST /api/v1/retries/range", s.requireAuth(s.handlePostRetryRange))
 	mux.HandleFunc("GET /api/v1/retries", s.requireAuth(s.handleGetRetries))
+
+	mux.HandleFunc("GET /dashboard/login", s.handleDashboardLoginGET)
+	mux.HandleFunc("POST /dashboard/login", s.handleDashboardLoginPOST)
+	mux.HandleFunc("POST /dashboard/logout", s.requireDashboardSession(s.requireDashboardCSRF(s.handleDashboardLogout)))
+	mux.HandleFunc("GET /dashboard", s.requireDashboardSession(s.handleDashboardShell))
+	mux.HandleFunc("GET /dashboard/partial/overview", s.requireDashboardSession(s.handleDashboardOverview))
+	mux.HandleFunc("GET /dashboard/partial/watchlist/addresses", s.requireDashboardSession(s.handleDashboardWatchlistAddresses))
+	mux.HandleFunc("GET /dashboard/partial/watchlist/contracts", s.requireDashboardSession(s.handleDashboardWatchlistContracts))
+	mux.HandleFunc("GET /dashboard/partial/webhooks", s.requireDashboardSession(s.handleDashboardWebhooks))
+	mux.HandleFunc("GET /dashboard/partial/webhooks/{eventID}/attempts", s.requireDashboardSession(s.handleDashboardWebhookAttempts))
+	mux.HandleFunc("GET /dashboard/partial/retries", s.requireDashboardSession(s.handleDashboardRetries))
+	mux.HandleFunc("POST /dashboard/action/watchlist/address/add", s.requireDashboardSession(s.requireDashboardCSRF(s.handleDashboardAddAddress)))
+	mux.HandleFunc("POST /dashboard/action/watchlist/address/deactivate", s.requireDashboardSession(s.requireDashboardCSRF(s.handleDashboardDeactivateAddress)))
+	mux.HandleFunc("POST /dashboard/action/watchlist/address/reactivate", s.requireDashboardSession(s.requireDashboardCSRF(s.handleDashboardReactivateAddress)))
+	mux.HandleFunc("POST /dashboard/action/watchlist/contract/add", s.requireDashboardSession(s.requireDashboardCSRF(s.handleDashboardAddContract)))
+	mux.HandleFunc("POST /dashboard/action/watchlist/contract/deactivate", s.requireDashboardSession(s.requireDashboardCSRF(s.handleDashboardDeactivateContract)))
+	mux.HandleFunc("POST /dashboard/action/watchlist/contract/reactivate", s.requireDashboardSession(s.requireDashboardCSRF(s.handleDashboardReactivateContract)))
+	mux.HandleFunc("POST /dashboard/action/webhook/settings", s.requireDashboardSession(s.requireDashboardCSRF(s.handleDashboardWebhookSettings)))
+	mux.HandleFunc("POST /dashboard/action/webhook/retry/{eventID}", s.requireDashboardSession(s.requireDashboardCSRF(s.handleDashboardRetryWebhookEvent)))
+	mux.HandleFunc("POST /dashboard/action/webhook/retry-all", s.requireDashboardSession(s.requireDashboardCSRF(s.handleDashboardRetryAllWebhooks)))
+	mux.HandleFunc("POST /dashboard/action/retries/block", s.requireDashboardSession(s.requireDashboardCSRF(s.handleDashboardRetryBlock)))
+	mux.HandleFunc("POST /dashboard/action/retries/range", s.requireDashboardSession(s.requireDashboardCSRF(s.handleDashboardRetryRange)))
 
 	s.srv = &http.Server{
 		Addr:         net.JoinHostPort("", cfg.HealthPort),
@@ -158,7 +195,7 @@ func (s *Server) handleGetAddresses(w http.ResponseWriter, r *http.Request) {
 	limit := queryInt(r, "limit", 50)
 	cursor := r.URL.Query().Get("cursor")
 
-	rows, err := s.db.ListAddresses(r.Context(), status, limit, cursor)
+	rows, err := s.db.ListAddresses(r.Context(), status, limit, cursor, "")
 	if err != nil {
 		slog.Error("list addresses", "err", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to list addresses"})
@@ -220,7 +257,7 @@ func (s *Server) handleGetContracts(w http.ResponseWriter, r *http.Request) {
 	limit := queryInt(r, "limit", 50)
 	cursor := r.URL.Query().Get("cursor")
 
-	rows, err := s.db.ListContracts(r.Context(), status, limit, cursor)
+	rows, err := s.db.ListContracts(r.Context(), status, limit, cursor, "")
 	if err != nil {
 		slog.Error("list contracts", "err", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to list contracts"})
@@ -282,29 +319,6 @@ func (s *Server) handleGetWebhook(w http.ResponseWriter, r *http.Request) {
 		"webhookUrl": url,
 		"isActive":   active,
 		"updatedAt":  updatedAt,
-	})
-}
-
-func (s *Server) handleGetRuntime(w http.ResponseWriter, r *http.Request) {
-	cursors, err := s.db.ListCursors(r.Context())
-	if err != nil {
-		slog.Error("list cursors", "err", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load runtime state"})
-		return
-	}
-	cursorOut := make([]map[string]any, 0, len(cursors))
-	for _, c := range cursors {
-		cursorOut = append(cursorOut, map[string]any{
-			"scope":        c.Scope,
-			"highestBlock": c.HighestBlock,
-		})
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"tronGridBaseUrl":      s.cfg.TronGridBaseURL,
-		"watchedAddressCount":  s.addresses.Len(),
-		"watchedContractCount": s.contracts.Len(),
-		"contracts":            s.contracts.List(),
-		"cursors":              cursorOut,
 	})
 }
 

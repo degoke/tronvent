@@ -85,3 +85,26 @@ CREATE TABLE IF NOT EXISTS scanner_settings (
   value jsonb NOT NULL,
   updated_at timestamptz NOT NULL DEFAULT now()
 );
+
+CREATE TABLE IF NOT EXISTS queue_jobs (
+  id text PRIMARY KEY,
+  queue text NOT NULL,
+  job_type text NOT NULL,
+  status text NOT NULL DEFAULT 'pending',
+  payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+  attempts integer NOT NULL DEFAULT 0,
+  max_attempts integer NOT NULL DEFAULT 10,
+  last_error text,
+  run_after timestamptz NOT NULL DEFAULT now(),
+  locked_at timestamptz,
+  locked_by text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  completed_at timestamptz
+);
+
+CREATE INDEX IF NOT EXISTS queue_jobs_claim_idx
+  ON queue_jobs (queue, status, run_after, created_at);
+
+CREATE INDEX IF NOT EXISTS queue_jobs_created_idx
+  ON queue_jobs (queue, created_at DESC);

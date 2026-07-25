@@ -86,13 +86,27 @@ func (c *Client) ListActiveAddresses(ctx context.Context) ([]string, error) {
 	return addrs, rows.Err()
 }
 
-// ListAddresses returns watched addresses with optional status filter and cursor pagination.
-func (c *Client) ListAddresses(ctx context.Context, status string, limit int, afterAddress string) ([]WatchedAddress, error) {
+// ListAddresses returns watched addresses with optional status filter, exact search, and cursor pagination.
+func (c *Client) ListAddresses(ctx context.Context, status string, limit int, afterAddress, search string) ([]WatchedAddress, error) {
 	if limit <= 0 {
 		limit = 50
 	}
 	if limit > 500 {
 		limit = 500
+	}
+	if search != "" {
+		rows, err := c.Pool.Query(ctx, `
+			SELECT id::text, address, status, source, created_at, updated_at
+			FROM scanner_watched_addresses
+			WHERE address = $1
+			  AND ($2 = '' OR status = $2)
+			LIMIT 1
+		`, search, status)
+		if err != nil {
+			return nil, fmt.Errorf("ListAddresses search: %w", err)
+		}
+		defer rows.Close()
+		return scanWatchedAddresses(rows)
 	}
 	rows, err := c.Pool.Query(ctx, `
 		SELECT id::text, address, status, source, created_at, updated_at
@@ -243,13 +257,35 @@ func (c *Client) ListActiveContracts(ctx context.Context) ([]string, error) {
 	return contracts, rows.Err()
 }
 
-// ListContracts returns watched contracts with optional status filter and cursor pagination.
-func (c *Client) ListContracts(ctx context.Context, status string, limit int, afterContract string) ([]WatchedContract, error) {
+// ListContracts returns watched contracts with optional status filter, exact search, and cursor pagination.
+func (c *Client) ListContracts(ctx context.Context, status string, limit int, afterContract, search string) ([]WatchedContract, error) {
 	if limit <= 0 {
 		limit = 50
 	}
 	if limit > 500 {
 		limit = 500
+	}
+	if search != "" {
+		rows, err := c.Pool.Query(ctx, `
+			SELECT id::text, contract_address, status, token_symbol, source, created_at, updated_at
+			FROM scanner_watched_contracts
+			WHERE contract_address = $1
+			  AND ($2 = '' OR status = $2)
+			LIMIT 1
+		`, search, status)
+		if err != nil {
+			return nil, fmt.Errorf("ListContracts search: %w", err)
+		}
+		defer rows.Close()
+		var out []WatchedContract
+		for rows.Next() {
+			var row WatchedContract
+			if err := rows.Scan(&row.ID, &row.ContractAddress, &row.Status, &row.TokenSymbol, &row.Source, &row.CreatedAt, &row.UpdatedAt); err != nil {
+				return nil, fmt.Errorf("ListContracts search scan: %w", err)
+			}
+			out = append(out, row)
+		}
+		return out, rows.Err()
 	}
 	rows, err := c.Pool.Query(ctx, `
 		SELECT id::text, contract_address, status, token_symbol, source, created_at, updated_at

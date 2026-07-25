@@ -130,7 +130,7 @@ Tronvent is designed to handle **thousands to millions of watched addresses** an
 ### 1. Run database migrations
 
 ```bash
-psql "$DATABASE_URL" -f migrations/001_scanner_schema.up.sql
+make migrate
 ```
 
 ### 2. Configure environment

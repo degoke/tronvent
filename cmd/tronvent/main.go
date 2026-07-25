@@ -152,7 +152,9 @@ func main() {
 		}
 	}()
 
-	apiSrv := api.New(cfg, db, addressStore, contractStore, webhookStore)
+	poller := scanner.NewPoller(cfg, db, db, addressStore, contractStore)
+
+	apiSrv := api.New(cfg, db, addressStore, contractStore, webhookStore, poller)
 	apiSrv.Start()
 
 	slog.Info(
@@ -163,8 +165,6 @@ func main() {
 		"pollIntervalMs", cfg.PollIntervalMs,
 		"requiredConfs", cfg.RequiredConfs,
 	)
-
-	poller := scanner.NewPoller(cfg, db, db, addressStore, contractStore)
 
 	runStartupReconcile(ctx, cfg, db, poller, contractStore)
 

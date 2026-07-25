@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"testing"
 	"time"
 
@@ -16,11 +17,12 @@ import (
 )
 
 type memDB struct {
-	addresses []internaldb.WatchedAddress
-	contracts []internaldb.WatchedContract
-	webhook   *internaldb.WebhookConfig
-	cursors   []internaldb.CursorRow
-	retries   []internaldb.RetryJobRecord
+	addresses     []internaldb.WatchedAddress
+	contracts     []internaldb.WatchedContract
+	webhook       *internaldb.WebhookConfig
+	cursors       []internaldb.CursorRow
+	retries       []internaldb.RetryJobRecord
+	webhookEvents []internaldb.DashboardWebhookEvent
 }
 
 func (m *memDB) ListActiveAddresses(_ context.Context) ([]string, error) {
@@ -48,9 +50,14 @@ func (m *memDB) GetWebhookConfig(_ context.Context) (*internaldb.WebhookConfig, 
 }
 
 func (m *memDB) AddWatchedAddress(_ context.Context, address, source string) (internaldb.WatchedAddress, bool, error) {
-	for _, a := range m.addresses {
+	for i, a := range m.addresses {
 		if a.Address == address {
-			return a, false, nil
+			if a.Status == "active" {
+				return a, false, nil
+			}
+			m.addresses[i].Status = "active"
+			m.addresses[i].UpdatedAt = time.Now()
+			return m.addresses[i], false, nil
 		}
 	}
 	row := internaldb.WatchedAddress{
@@ -60,14 +67,36 @@ func (m *memDB) AddWatchedAddress(_ context.Context, address, source string) (in
 	return row, true, nil
 }
 
-func (m *memDB) ListAddresses(_ context.Context, status string, limit int, afterAddress string) ([]internaldb.WatchedAddress, error) {
-	return m.addresses, nil
+func (m *memDB) ListAddresses(_ context.Context, status string, limit int, afterAddress, search string) ([]internaldb.WatchedAddress, error) {
+	var out []internaldb.WatchedAddress
+	for _, a := range m.addresses {
+		if status != "" && a.Status != status {
+			continue
+		}
+		if search != "" && a.Address != search {
+			continue
+		}
+		if afterAddress != "" && a.Address <= afterAddress {
+			continue
+		}
+		out = append(out, a)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Address < out[j].Address })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }
 
 func (m *memDB) AddWatchedContract(_ context.Context, contractAddress, tokenSymbol, source string) (internaldb.WatchedContract, bool, error) {
-	for _, c := range m.contracts {
+	for i, c := range m.contracts {
 		if c.ContractAddress == contractAddress {
-			return c, false, nil
+			if c.Status == "active" {
+				return c, false, nil
+			}
+			m.contracts[i].Status = "active"
+			m.contracts[i].UpdatedAt = time.Now()
+			return m.contracts[i], false, nil
 		}
 	}
 	sym := tokenSymbol
@@ -79,8 +108,25 @@ func (m *memDB) AddWatchedContract(_ context.Context, contractAddress, tokenSymb
 	return row, true, nil
 }
 
-func (m *memDB) ListContracts(_ context.Context, status string, limit int, afterContract string) ([]internaldb.WatchedContract, error) {
-	return m.contracts, nil
+func (m *memDB) ListContracts(_ context.Context, status string, limit int, afterContract, search string) ([]internaldb.WatchedContract, error) {
+	var out []internaldb.WatchedContract
+	for _, c := range m.contracts {
+		if status != "" && c.Status != status {
+			continue
+		}
+		if search != "" && c.ContractAddress != search {
+			continue
+		}
+		if afterContract != "" && c.ContractAddress <= afterContract {
+			continue
+		}
+		out = append(out, c)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ContractAddress < out[j].ContractAddress })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }
 
 func (m *memDB) UpsertWebhookConfig(_ context.Context, webhookURL, signingSecret string, isActive bool, source string) (*internaldb.WebhookConfig, error) {
@@ -162,13 +208,97 @@ func (m *memDB) ListRetryJobs(_ context.Context, status string, limit int) ([]in
 	return out, nil
 }
 
+func (m *memDB) UpsertWebhookConfigPreserveSecret(_ context.Context, webhookURL, signingSecret string, isActive bool, source string) (*internaldb.WebhookConfig, error) {
+	if signingSecret == "" && m.webhook != nil {
+		signingSecret = m.webhook.SigningSecret
+	}
+	return m.UpsertWebhookConfig(context.Background(), webhookURL, signingSecret, isActive, source)
+}
+
+func (m *memDB) ListWebhookEvents(_ context.Context, status string, limit int) ([]internaldb.DashboardWebhookEvent, error) {
+	var out []internaldb.DashboardWebhookEvent
+	for _, ev := range m.webhookEvents {
+		if status != "" && ev.Status != status {
+			continue
+		}
+		out = append(out, ev)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (m *memDB) ListWebhookDeliveryAttempts(_ context.Context, eventID string) ([]internaldb.DashboardDeliveryAttempt, error) {
+	return nil, nil
+}
+
+func (m *memDB) RetryWebhookEvent(_ context.Context, eventID string) error {
+	for i, ev := range m.webhookEvents {
+		if ev.ID != eventID {
+			continue
+		}
+		if ev.Status != "failed" && ev.Status != "dead" {
+			return internaldb.ErrWebhookEventNotFound
+		}
+		m.webhookEvents[i].Status = "pending"
+		m.webhookEvents[i].AttemptCount = 0
+		return nil
+	}
+	return internaldb.ErrWebhookEventNotFound
+}
+
+func (m *memDB) RetryAllFailedDeadWebhookEvents(_ context.Context) (int64, error) {
+	var count int64
+	for i, ev := range m.webhookEvents {
+		if ev.Status == "failed" || ev.Status == "dead" {
+			m.webhookEvents[i].Status = "pending"
+			m.webhookEvents[i].AttemptCount = 0
+			count++
+		}
+	}
+	return count, nil
+}
+
+func (m *memDB) ListQueueJobs(_ context.Context, queues []string, statusFilter string, limit int) ([]internaldb.DashboardQueueJob, error) {
+	var out []internaldb.DashboardQueueJob
+	for _, job := range m.retries {
+		if statusFilter != "" && statusFilter != "all" && statusFilter != "active" {
+			if job.Status != statusFilter {
+				continue
+			}
+		} else if statusFilter == "" || statusFilter == "active" {
+			if job.Status != "pending" && job.Status != "running" {
+				continue
+			}
+		}
+		out = append(out, internaldb.DashboardQueueJob{
+			ID: job.ID, Queue: job.Queue, JobType: job.JobType,
+			FromBlock: job.FromBlock, ToBlock: job.ToBlock,
+			Status: job.Status, Attempts: job.Attempts, MaxAttempts: job.MaxAttempts,
+			LastError: job.LastError, CreatedAt: job.CreatedAt, UpdatedAt: job.UpdatedAt,
+			CompletedAt: job.CompletedAt,
+		})
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+type stubChainTip struct{}
+
+func (stubChainTip) GetLatestBlockNumber(_ context.Context) (int64, error) {
+	return 50_000_000, nil
+}
+
 func newTestServer(t *testing.T, mem *memDB) *api.Server {
 	t.Helper()
 	addrStore := store.NewAddressStore(mem)
 	contractStore := store.NewContractStore(mem)
 	webhookStore := store.NewWebhookConfigStore(mem)
 	cfg := &config.Config{HealthPort: "0", AdminAPIToken: "secret", TronGridBaseURL: "https://api.trongrid.io"}
-	return api.New(cfg, mem, addrStore, contractStore, webhookStore)
+	return api.New(cfg, mem, addrStore, contractStore, webhookStore, stubChainTip{})
 }
 
 func TestPostAddressRequiresAuth(t *testing.T) {
