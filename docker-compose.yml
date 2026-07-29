@@ -1,0 +1,42 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: tronvent
+      POSTGRES_USER: tronvent
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tronvent-local}
+    volumes:
+      - tronvent-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tronvent -d tronvent"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    image: ${TRONVENT_IMAGE:-ghcr.io/degoke/tronvent:latest}
+    command: ["/app/migrate"]
+    environment:
+      DATABASE_URL: postgres://tronvent:${POSTGRES_PASSWORD:-tronvent-local}@postgres:5432/tronvent
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  tronvent:
+    image: ${TRONVENT_IMAGE:-ghcr.io/degoke/tronvent:latest}
+    ports:
+      - "${TRONVENT_PORT:-8080}:8080"
+    environment:
+      DATABASE_URL: postgres://tronvent:${POSTGRES_PASSWORD:-tronvent-local}@postgres:5432/tronvent
+      TRONGRID_API_KEY_SCANNER: ${TRONGRID_API_KEY_SCANNER:?set TRONGRID_API_KEY_SCANNER}
+      TRONGRID_BASE_URL: ${TRONGRID_BASE_URL:-https://api.trongrid.io}
+      ADMIN_API_TOKEN: ${ADMIN_API_TOKEN:?set ADMIN_API_TOKEN}
+      WEBHOOK_URL: ${WEBHOOK_URL:?set WEBHOOK_URL}
+      WEBHOOK_SIGNING_SECRET: ${WEBHOOK_SIGNING_SECRET:?set WEBHOOK_SIGNING_SECRET}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  tronvent-postgres:

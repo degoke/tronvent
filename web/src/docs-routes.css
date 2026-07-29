@@ -1,0 +1,76 @@
+.manual-page {
+  scroll-margin-top: 100px;
+  margin-bottom: 40px;
+}
+.manual-page h2 {
+  font: 600 38px/1.15 Sora;
+  letter-spacing: -0.04em;
+  margin: 14px 0 18px;
+}
+.manual-page p {
+  font-size: 13px;
+  line-height: 1.8;
+  color: #8b93a1;
+  max-width: 700px;
+}
+.manual-page code {
+  font: 11px 'JetBrains Mono';
+  color: #d6dbe3;
+}
+.quick-links {
+  display: grid;
+  gap: 10px;
+  max-width: 700px;
+  margin-top: 30px;
+}
+.quick-links a {
+  border: 1px solid #2a2d35;
+  background: #0f1116;
+  padding: 17px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.quick-links a:hover {
+  border-color: #ff1e2d;
+}
+.quick-links strong {
+  font-size: 12px;
+}
+.quick-links span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #8b93a1;
+  font-size: 11px;
+}
+.manual-page .manual-lede {
+  font-size: 16px;
+  line-height: 1.75;
+  color: #adb4bf;
+}
+.manual-page .docs-code {
+  max-width: 760px;
+}
+.manual-page .config-table,
+.manual-page .header-list,
+.manual-page .ops-list {
+  max-width: 760px;
+}
+.manual-page .action-grid {
+  max-width: 760px;
+}
+.manual-page .docs-next {
+  max-width: 760px;
+}
+@media (max-width: 800px) {
+  .manual-page h2 {
+    font-size: 31px;
+  }
+  .quick-links a {
+    display: block;
+  }
+  .quick-links span {
+    margin-top: 8px;
+  }
+}

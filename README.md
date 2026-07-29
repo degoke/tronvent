@@ -1,5 +1,7 @@
 # Tronvent
 
+![Tronvent](tronvent.png)
+
 [![License: Elastic-2.0](https://img.shields.io/badge/License-Elastic--2.0-005571.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![TRON](https://img.shields.io/badge/TRON-TronGrid-red?logo=bitcoin&logoColor=white)](https://www.trongrid.io/)
@@ -125,78 +127,76 @@ Tronvent is designed to handle **thousands to millions of watched addresses** an
 
 ---
 
-## Quick start
+## Getting started
 
-### 1. Run database migrations
+Choose a deployment path below. All container-based paths use published artifacts; you do not need to clone this repository.
 
-```bash
-make migrate
+### Docker Compose
+
+Create a `docker-compose.yml` file with this sample:
+
+```yaml
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: tronvent
+      POSTGRES_USER: tronvent
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tronvent-local}
+    volumes:
+      - tronvent-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tronvent -d tronvent"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    image: ghcr.io/degoke/tronvent:1.0.0
+    command: ["/app/migrate"]
+    environment:
+      DATABASE_URL: postgres://tronvent:${POSTGRES_PASSWORD:-tronvent-local}@postgres:5432/tronvent
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  tronvent:
+    image: ghcr.io/degoke/tronvent:1.0.0
+    ports:
+      - "8080:8080"
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://tronvent:${POSTGRES_PASSWORD:-tronvent-local}@postgres:5432/tronvent
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  tronvent-postgres:
 ```
 
-### 2. Configure environment
+Then create a `.env` file with the required values:
 
 ```bash
-export DATABASE_URL="postgres://user:pass@localhost:5432/tronvent"
-export TRONGRID_API_KEY_SCANNER="your-trongrid-api-key"
-export ADMIN_API_TOKEN="a-long-random-secret"
-export WEBHOOK_URL="https://your-app.example.com/webhooks/tron"
-export WEBHOOK_SIGNING_SECRET="another-long-random-secret"
-
-# Network — pick one:
-export TRONGRID_BASE_URL="https://api.trongrid.io"          # Mainnet
-# export TRONGRID_BASE_URL="https://api.shasta.trongrid.io" # Shasta testnet
-# export TRONGRID_BASE_URL="https://nile.trongrid.io"       # Nile testnet
+TRONGRID_API_KEY_SCANNER=your-trongrid-api-key
+ADMIN_API_TOKEN=a-long-random-secret
+WEBHOOK_URL=https://your-app.example.com/webhooks/tron
+WEBHOOK_SIGNING_SECRET=another-long-random-secret
 ```
 
-### 3. Run locally
+Then start the complete local stack:
 
 ```bash
-git clone https://github.com/degoke/tronvent.git
-cd tronvent
-make build
-./bin/tronvent
+TRONVENT_IMAGE=ghcr.io/degoke/tronvent:1.0.0 docker compose up -d
+docker compose logs -f tronvent
 ```
 
-Or with live reload during development:
+Tronvent is available at `http://localhost:8080`. Stop the stack with `docker compose down`; add `-v` if you also want to remove the local PostgreSQL volume.
+
+### Docker
 
 ```bash
-air   # requires github.com/air-verse/air
-```
-
-### 4. Register watches and webhook
-
-```bash
-BASE=http://localhost:8080
-AUTH="Authorization: Bearer $ADMIN_API_TOKEN"
-
-# Watch a deposit address
-curl -s -X POST "$BASE/api/v1/addresses" \
-  -H "$AUTH" -H "Content-Type: application/json" \
-  -d '{"address":"TXYZ..."}'
-
-# Watch a TRC-20 contract (USDT on mainnet is bootstrapped automatically)
-curl -s -X POST "$BASE/api/v1/contracts" \
-  -H "$AUTH" -H "Content-Type: application/json" \
-  -d '{"contractAddress":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t","tokenSymbol":"USDT"}'
-
-# Configure webhook delivery
-curl -s -X PUT "$BASE/api/v1/webhook" \
-  -H "$AUTH" -H "Content-Type: application/json" \
-  -d "{\"webhookUrl\":\"$WEBHOOK_URL\",\"signingSecret\":\"$WEBHOOK_SIGNING_SECRET\"}"
-
-# Check scanner state
-curl -s "$BASE/api/v1/runtime" -H "$AUTH" | jq
-```
-
-Health check: `GET /health`  
-Metrics: `GET /metrics`
-
----
-
-## Docker
-
-```bash
-docker build -t tronvent:local .
+docker pull ghcr.io/degoke/tronvent:1.0.0
 docker run --rm -p 8080:8080 \
   -e DATABASE_URL="$DATABASE_URL" \
   -e TRONGRID_API_KEY_SCANNER="$TRONGRID_API_KEY_SCANNER" \
@@ -204,14 +204,33 @@ docker run --rm -p 8080:8080 \
   -e ADMIN_API_TOKEN="$ADMIN_API_TOKEN" \
   -e WEBHOOK_URL="$WEBHOOK_URL" \
   -e WEBHOOK_SIGNING_SECRET="$WEBHOOK_SIGNING_SECRET" \
-  tronvent:local
+  ghcr.io/degoke/tronvent:1.0.0
 ```
 
 Pre-built images are published to `ghcr.io/degoke/tronvent` on release.
 
+This route assumes PostgreSQL and migrations are already available. For a complete PostgreSQL + migration + Tronvent stack, use Docker Compose above.
+
 ---
 
-## Kubernetes (Helm)
+### Kubernetes (Helm)
+
+Install a released chart from GHCR:
+
+```bash
+helm registry login ghcr.io
+helm upgrade --install tronvent oci://ghcr.io/degoke/charts/tronvent \
+  --version 1.0.0 \
+  --namespace tronvent --create-namespace \
+  --set secrets.databaseUrl="$DATABASE_URL" \
+  --set secrets.tronGridApiKey="$TRONGRID_API_KEY_SCANNER" \
+  --set secrets.adminApiToken="$ADMIN_API_TOKEN" \
+  --set secrets.webhookSigningSecret="$WEBHOOK_SIGNING_SECRET" \
+  --set config.tronGridBaseUrl="https://api.trongrid.io" \
+  --set config.webhookUrl="$WEBHOOK_URL"
+```
+
+The release workflow publishes both the Docker image and Helm chart when a `v*` tag is pushed. The chart is available at `oci://ghcr.io/degoke/charts/tronvent`.
 
 ```bash
 # Run migrations first (see above)
@@ -235,6 +254,72 @@ secrets:
 ```
 
 See `charts/tronvent/values.yaml` for all configurable values including resource limits, probes, ingress, and Prometheus ServiceMonitor.
+
+### Local development
+
+#### 1. Run database migrations
+
+```bash
+make migrate
+```
+
+#### 2. Configure environment
+
+```bash
+export DATABASE_URL="postgres://user:pass@localhost:5432/tronvent"
+export TRONGRID_API_KEY_SCANNER="your-trongrid-api-key"
+export ADMIN_API_TOKEN="a-long-random-secret"
+export WEBHOOK_URL="https://your-app.example.com/webhooks/tron"
+export WEBHOOK_SIGNING_SECRET="another-long-random-secret"
+
+# Network — pick one:
+export TRONGRID_BASE_URL="https://api.trongrid.io"          # Mainnet
+# export TRONGRID_BASE_URL="https://api.shasta.trongrid.io" # Shasta testnet
+# export TRONGRID_BASE_URL="https://nile.trongrid.io"       # Nile testnet
+```
+
+#### 3. Run locally
+
+```bash
+git clone https://github.com/degoke/tronvent.git
+cd tronvent
+make build
+./bin/tronvent
+```
+
+Or with live reload during development:
+
+```bash
+air   # requires github.com/air-verse/air
+```
+
+#### 4. Register watches and webhook
+
+```bash
+BASE=http://localhost:8080
+AUTH="Authorization: Bearer $ADMIN_API_TOKEN"
+
+# Watch a deposit address
+curl -s -X POST "$BASE/api/v1/addresses" \
+  -H "$AUTH" -H "Content-Type: application/json" \
+  -d '{"address":"TXYZ..."}'
+
+# Watch a TRC-20 contract
+curl -s -X POST "$BASE/api/v1/contracts" \
+  -H "$AUTH" -H "Content-Type: application/json" \
+  -d '{"contractAddress":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t","tokenSymbol":"USDT"}'
+
+# Configure webhook delivery
+curl -s -X PUT "$BASE/api/v1/webhook" \
+  -H "$AUTH" -H "Content-Type: application/json" \
+  -d "{\"webhookUrl\":\"$WEBHOOK_URL\",\"signingSecret\":\"$WEBHOOK_SIGNING_SECRET\"}"
+
+# Check scanner state
+curl -s "$BASE/api/v1/runtime" -H "$AUTH" | jq
+```
+
+Health check: `GET /health`  
+Metrics: `GET /metrics`
 
 ---
 

@@ -272,13 +272,7 @@ func (m *memDB) ListQueueJobs(_ context.Context, queues []string, statusFilter s
 				continue
 			}
 		}
-		out = append(out, internaldb.DashboardQueueJob{
-			ID: job.ID, Queue: job.Queue, JobType: job.JobType,
-			FromBlock: job.FromBlock, ToBlock: job.ToBlock,
-			Status: job.Status, Attempts: job.Attempts, MaxAttempts: job.MaxAttempts,
-			LastError: job.LastError, CreatedAt: job.CreatedAt, UpdatedAt: job.UpdatedAt,
-			CompletedAt: job.CompletedAt,
-		})
+		out = append(out, internaldb.DashboardQueueJob(job))
 		if len(out) >= limit {
 			break
 		}

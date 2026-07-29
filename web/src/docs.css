@@ -1,0 +1,365 @@
+.docs-site {
+  min-height: 100vh;
+  background: #09070a;
+  color: #e6e8eb;
+}
+.docs-header {
+  height: 72px;
+  border-bottom: 1px solid #2a2d35;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 32px;
+  position: sticky;
+  top: 0;
+  background: #09070aee;
+  backdrop-filter: blur(12px);
+  z-index: 5;
+}
+.docs-brand {
+  display: inline-flex;
+  align-items: center;
+}
+.docs-logo-img {
+  display: block;
+  height: 40px;
+  width: auto;
+  max-width: min(220px, 50vw);
+  object-fit: contain;
+}
+.docs-header-links {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+}
+.docs-header-links a {
+  color: #8b93a1;
+  font-size: 12px;
+  display: flex;
+  gap: 5px;
+  align-items: center;
+}
+.docs-header-links a:hover {
+  color: #ff1e2d;
+}
+.docs-menu {
+  display: none;
+}
+.docs-shell {
+  max-width: 1240px;
+  margin: auto;
+  display: grid;
+  grid-template-columns: 275px minmax(0, 1fr);
+}
+.docs-sidebar {
+  border-right: 1px solid #2a2d35;
+  padding: 48px 28px;
+  min-height: calc(100vh - 72px);
+}
+.eyebrow,
+.manual-label {
+  font: 500 10px 'JetBrains Mono';
+  letter-spacing: 0.14em;
+  color: #ff1e2d;
+}
+.sidebar-title .eyebrow {
+  color: #ff1e2d;
+}
+.sidebar-title h1 {
+  font: 600 25px Sora;
+  letter-spacing: -0.04em;
+  margin: 15px 0 10px;
+}
+.sidebar-title p {
+  font-size: 12px;
+  line-height: 1.7;
+  color: #8b93a1;
+  margin: 0;
+}
+.docs-sidebar nav {
+  border-top: 1px solid #2a2d35;
+  margin-top: 35px;
+  padding-top: 12px;
+  display: grid;
+}
+.docs-sidebar nav a {
+  border-left: 1px solid transparent;
+  color: #8b93a1;
+  padding: 10px 12px;
+  font-size: 12px;
+}
+.docs-sidebar nav a:hover,
+.docs-sidebar nav a.current {
+  border-left-color: #ff1e2d;
+  background: #101218;
+  color: #e6e8eb;
+}
+.manual {
+  padding: 50px 82px 100px;
+  max-width: 900px;
+}
+.manual-crumb {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #8b93a1;
+  font: 10px 'JetBrains Mono';
+  letter-spacing: 0.12em;
+  margin-bottom: 40px;
+}
+.manual-section {
+  scroll-margin-top: 100px;
+  margin-bottom: 96px;
+}
+.manual-label {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+.manual-label span {
+  color: #8b93a1;
+}
+.manual-section h2 {
+  font: 600 38px/1.15 Sora;
+  letter-spacing: -0.04em;
+  margin: 14px 0 18px;
+}
+.manual-section p {
+  font-size: 13px;
+  line-height: 1.8;
+  color: #8b93a1;
+  max-width: 680px;
+}
+.manual-lede {
+  font-size: 16px !important;
+  line-height: 1.75 !important;
+  color: #adb4bf !important;
+}
+.manual-section code {
+  font: 11px 'JetBrains Mono';
+  color: #d6dbe3;
+}
+.action-grid div {
+  border: 1px solid #2a2d35;
+  background: #0f1116;
+  padding: 17px;
+}
+.action-grid svg {
+  color: #ff1e2d;
+  margin-bottom: 22px;
+}
+.callout {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  border: 1px solid #343842;
+  background: #101218;
+  padding: 16px 18px;
+  color: #aeb4be;
+  font-size: 12px;
+  line-height: 1.65;
+  margin: 25px 0;
+  max-width: 700px;
+}
+.callout svg {
+  color: #ff1e2d;
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+.callout.warning {
+  border-color: #665629;
+}
+.callout.warning svg {
+  color: #e5b94c;
+}
+.callout.success {
+  border-color: #245d3b;
+}
+.callout.success svg {
+  color: #22c55e;
+}
+.docs-code {
+  background: #101218;
+  border: 1px solid #2a2d35;
+  border-radius: 8px;
+  margin: 22px 0;
+  overflow: hidden;
+  max-width: 760px;
+}
+.code-top {
+  border-bottom: 1px solid #2a2d35;
+  padding: 10px 14px;
+  display: flex;
+  justify-content: space-between;
+  color: #8b93a1;
+  font: 9px 'JetBrains Mono';
+  letter-spacing: 0.12em;
+}
+.code-top button {
+  color: #8b93a1;
+  cursor: pointer;
+}
+.docs-code pre {
+  padding: 18px 20px;
+  margin: 0;
+  overflow: auto;
+  color: #d6dbe3;
+  font: 11px/1.75 'JetBrains Mono';
+}
+.small-note {
+  font-size: 11px !important;
+}
+.config-table,
+.header-list {
+  border-top: 1px solid #2a2d35;
+  margin-top: 25px;
+  max-width: 760px;
+}
+.config-table div,
+.header-list div {
+  display: grid;
+  grid-template-columns: 230px 1fr;
+  gap: 20px;
+  padding: 14px 0;
+  border-bottom: 1px solid #2a2d35;
+}
+.config-table span,
+.header-list span {
+  font-size: 11px;
+  color: #8b93a1;
+}
+.action-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  margin: 28px 0;
+}
+.action-grid strong,
+.action-grid span {
+  display: block;
+  font-size: 11px;
+}
+.action-grid span {
+  color: #8b93a1;
+  line-height: 1.6;
+  margin-top: 7px;
+}
+.ops-list {
+  border-top: 1px solid #2a2d35;
+  max-width: 760px;
+}
+.step {
+  display: grid;
+  grid-template-columns: 48px 1fr;
+  gap: 15px;
+  padding: 20px 0;
+  border-bottom: 1px solid #2a2d35;
+}
+.step-number {
+  font: 10px 'JetBrains Mono';
+  color: #ff1e2d;
+}
+.step h3 {
+  font: 500 15px Inter;
+  margin: 0;
+}
+.step p {
+  margin: 7px 0 0;
+}
+.docs-next {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  border: 1px solid #245d3b;
+  background: #0d1711;
+  padding: 18px;
+  margin-top: 28px;
+  max-width: 760px;
+}
+.docs-next > svg {
+  color: #22c55e;
+  flex: 0 0 auto;
+}
+.docs-next strong,
+.docs-next span {
+  display: block;
+  font-size: 12px;
+}
+.docs-next span {
+  color: #8b93a1;
+  margin-top: 6px;
+}
+.docs-next a {
+  color: #e6e8eb;
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+}
+.docs-footer {
+  max-width: 1240px;
+  margin: auto;
+  border-top: 1px solid #2a2d35;
+  padding: 30px 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #8b93a1;
+  font-size: 11px;
+}
+.docs-footer a:last-child {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  color: #c5cad3;
+}
+@media (max-width: 800px) {
+  .docs-header {
+    padding: 0 20px;
+  }
+  .docs-header-links {
+    display: none;
+  }
+  .docs-menu {
+    display: block;
+  }
+  .docs-shell {
+    display: block;
+  }
+  .docs-sidebar {
+    min-height: auto;
+    border-right: 0;
+    border-bottom: 1px solid #2a2d35;
+    padding: 32px 20px;
+  }
+  .docs-sidebar nav {
+    display: flex;
+    overflow: auto;
+    gap: 3px;
+    margin-top: 24px;
+  }
+  .docs-sidebar nav a {
+    white-space: nowrap;
+  }
+  .manual {
+    padding: 38px 20px 70px;
+  }
+  .manual-section {
+    margin-bottom: 72px;
+  }
+  .manual-section h2 {
+    font-size: 31px;
+  }
+  .action-grid {
+    grid-template-columns: 1fr;
+  }
+  .config-table div,
+  .header-list div {
+    grid-template-columns: 1fr;
+    gap: 7px;
+  }
+  .docs-footer {
+    padding: 25px 20px;
+    display: grid;
+    gap: 15px;
+  }
+}
