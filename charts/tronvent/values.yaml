@@ -69,7 +69,7 @@ config:
   webhookMaxAttempts: "8"
   webhookPollIntervalMs: "1000"
   webhookHttpTimeoutSeconds: "30"
-  stateResyncIntervalSeconds: "60"
+  stateResyncIntervalSeconds: "0"
 
 # Secrets — prefer existingSecret (pre-created in the cluster) for production.
 secrets:

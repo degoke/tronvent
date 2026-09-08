@@ -91,7 +91,7 @@ Tronvent tunes the filter for **1 million addresses at a 0.1% false-positive rat
 | **Rare false positives** | ~1 in 1,000 non-watched addresses may pass the filter. These are harmless: the event is still deduplicated and delivered; you simply receive a webhook you can ignore. |
 | **Memory efficient** | Millions of addresses fit in a few megabytes instead of a multi-gigabyte hash map. |
 
-The filter reloads from Postgres on startup, on `LISTEN/NOTIFY` when addresses change via the admin API, and on a periodic safety-net interval (`STATE_RESYNC_INTERVAL_SECONDS`).
+The filter reloads from Postgres on startup and on `LISTEN/NOTIFY` when addresses change via the admin API. An optional periodic safety-net reload can be enabled with `STATE_RESYNC_INTERVAL_SECONDS`; `0` disables it.
 
 ### Reliability
 
@@ -377,7 +377,7 @@ Reference: [TRON network endpoints](https://developers.tron.network/docs/connect
 |---|---|---|
 | `HEALTH_PORT` | `8080` | HTTP port (health, metrics, admin API) |
 | `ADMIN_API_TOKEN` | — | Bearer token for `/api/v1/*` (required for admin API) |
-| `STATE_RESYNC_INTERVAL_SECONDS` | `60` | Periodic watchlist reload safety net |
+| `STATE_RESYNC_INTERVAL_SECONDS` | `0` (disabled) | Optional periodic watchlist reload safety net in seconds |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARN`, `ERROR` |
 | `LOG_FORMAT` | auto | `json` or `text` (color when TTY) |
 

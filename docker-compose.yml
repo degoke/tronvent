@@ -34,6 +34,7 @@ services:
       ADMIN_API_TOKEN: ${ADMIN_API_TOKEN:?set ADMIN_API_TOKEN}
       WEBHOOK_URL: ${WEBHOOK_URL:?set WEBHOOK_URL}
       WEBHOOK_SIGNING_SECRET: ${WEBHOOK_SIGNING_SECRET:?set WEBHOOK_SIGNING_SECRET}
+      STATE_RESYNC_INTERVAL_SECONDS: ${STATE_RESYNC_INTERVAL_SECONDS:-0}
     depends_on:
       migrate:
         condition: service_completed_successfully

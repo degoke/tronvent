@@ -130,22 +130,21 @@ func main() {
 	})
 	go listener.Run(ctx)
 
-	resyncInterval := time.Duration(cfg.StateResyncIntervalSeconds) * time.Second
-	if resyncInterval <= 0 {
-		resyncInterval = 60 * time.Second
-	}
-	go func() {
-		ticker := time.NewTicker(resyncInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				reloadAll("periodic")
+	if cfg.StateResyncIntervalSeconds > 0 {
+		resyncInterval := time.Duration(cfg.StateResyncIntervalSeconds) * time.Second
+		go func() {
+			ticker := time.NewTicker(resyncInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					reloadAll("periodic")
+				}
 			}
-		}
-	}()
+		}()
+	}
 
 	poller := scanner.NewPoller(cfg, db, db, addressStore, contractStore)
 

@@ -48,7 +48,8 @@ type Config struct {
 	// Admin API auth
 	AdminAPIToken string
 
-	// StateResyncIntervalSeconds is the periodic full reload safety net for LISTEN/NOTIFY.
+	// StateResyncIntervalSeconds is the optional periodic full reload safety net for LISTEN/NOTIFY.
+	// A value of 0 disables periodic resync.
 	StateResyncIntervalSeconds int64
 }
 
@@ -123,7 +124,7 @@ func Load() (cfg *Config, err error) {
 		WebhookPollIntervalMs:      envInt64OrDefault("WEBHOOK_POLL_INTERVAL_MS", 1000),
 		WebhookHTTPTimeoutSeconds:  envInt64OrDefault("WEBHOOK_HTTP_TIMEOUT_SECONDS", 30),
 		AdminAPIToken:              os.Getenv("ADMIN_API_TOKEN"),
-		StateResyncIntervalSeconds: envInt64OrDefault("STATE_RESYNC_INTERVAL_SECONDS", 60),
+		StateResyncIntervalSeconds: envInt64OrDefault("STATE_RESYNC_INTERVAL_SECONDS", 0),
 	}
 	if raw := os.Getenv("TRON_TRC20_CONTRACTS"); raw != "" {
 		for _, s := range strings.Split(raw, ",") {
