@@ -64,7 +64,7 @@ config:
   fetchConcurrency: "5"
   httpTimeoutSeconds: "60"
   reconcileBatchSize: "1000"
-  trc20Contracts: "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+  trc20Contracts: ""
   webhookUrl: ""
   webhookMaxAttempts: "8"
   webhookPollIntervalMs: "1000"

@@ -20,10 +20,6 @@ import (
 	"github.com/lmittmann/tint"
 )
 
-var defaultTrc20Contracts = []string{
-	"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
-}
-
 func main() {
 	level := slog.LevelInfo
 	if v := strings.ToUpper(os.Getenv("LOG_LEVEL")); v != "" {
@@ -68,8 +64,7 @@ func main() {
 	}
 	defer db.Close()
 
-	contracts := resolveTrc20Contracts(cfg)
-	if err := db.BootstrapWatchedContracts(ctx, contracts); err != nil {
+	if err := db.BootstrapWatchedContracts(ctx, cfg.Trc20Contracts); err != nil {
 		slog.Error("bootstrap contracts", "err", err)
 		os.Exit(1)
 	}
@@ -268,11 +263,4 @@ func runStartupReconcile(ctx context.Context, cfg *config.Config, db *internaldb
 			)
 		}
 	}
-}
-
-func resolveTrc20Contracts(cfg *config.Config) []string {
-	if len(cfg.Trc20Contracts) > 0 {
-		return cfg.Trc20Contracts
-	}
-	return defaultTrc20Contracts
 }

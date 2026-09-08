@@ -7,7 +7,7 @@ Tronvent polls TronGrid on your behalf, persists cursors in PostgreSQL, and retr
 ## What it monitors
 
 - TRX transfers (`TransferContract`) where a watched address is sender or receiver
-- TRC-20 `Transfer` events on watched token contracts (USDT is seeded by default)
+- TRC-20 `Transfer` events on watched token contracts (none are seeded by default)
 
 ## Quick start
 

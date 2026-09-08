@@ -40,7 +40,7 @@ Tronvent exists to do exactly that: one service that watches your addresses and 
 **Supported activity today:**
 
 - **TRX transfers** — native TRX `TransferContract` transactions where your address is sender or receiver
-- **TRC-20 transfers** — `Transfer` events on watched token contracts (USDT is seeded by default)
+- **TRC-20 transfers** — `Transfer` events on watched token contracts (none are seeded by default)
 
 When a match is found, Tronvent writes to a durable Postgres outbox and a background worker POSTs a signed webhook to your endpoint.
 
@@ -359,7 +359,7 @@ Reference: [TRON network endpoints](https://developers.tron.network/docs/connect
 | `TRON_FETCH_CONCURRENCY` | `5` | Parallel TronGrid HTTP requests |
 | `TRON_HTTP_TIMEOUT_SECONDS` | `60` | HTTP client timeout |
 | `TRON_RECONCILE_BATCH_SIZE` | `1000` | Blocks per startup backfill job |
-| `TRON_TRC20_CONTRACTS` | USDT mainnet | Comma-separated contracts to seed on first boot |
+| `TRON_TRC20_CONTRACTS` | — | Optional comma-separated contracts to seed on first boot |
 
 ### Webhook delivery
 
