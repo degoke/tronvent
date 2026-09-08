@@ -102,11 +102,15 @@ func Load() (cfg *Config, err error) {
 	if err != nil {
 		return nil, err
 	}
+	tronGridAPIKey := mustEnv("TRONGRID_API_KEY_SCANNER")
+	if err := validateTronGridAPIKeys(tronGridAPIKey); err != nil {
+		return nil, err
+	}
 
 	c := &Config{
 		DatabaseURL:                dsn,
 		TronGridBaseURL:            envOrDefault("TRONGRID_BASE_URL", "https://api.trongrid.io"),
-		TronGridAPIKey:             mustEnv("TRONGRID_API_KEY_SCANNER"),
+		TronGridAPIKey:             tronGridAPIKey,
 		PollIntervalMs:             envInt64OrDefault("TRON_POLL_INTERVAL_MS", 3000),
 		StartBlock:                 envInt64OrDefault("TRON_START_BLOCK", 0),
 		RequiredConfs:              envInt64OrDefault("TRON_REQUIRED_CONFIRMATIONS", 20),
@@ -134,6 +138,15 @@ func Load() (cfg *Config, err error) {
 		}
 	}
 	return c, nil
+}
+
+func validateTronGridAPIKeys(raw string) error {
+	for _, key := range strings.Split(raw, ",") {
+		if strings.TrimSpace(key) != "" {
+			return nil
+		}
+	}
+	return fmt.Errorf("required environment variable %q must contain at least one API key", "TRONGRID_API_KEY_SCANNER")
 }
 
 func mustEnv(key string) string {

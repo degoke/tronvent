@@ -60,6 +60,7 @@ const samples = {
   ]),
   env: join([
     'TRONGRID_API_KEY_SCANNER=your-trongrid-api-key',
+    '# For multiple keys: TRONGRID_API_KEY_SCANNER=key-a,key-b',
     'TRONGRID_BASE_URL=https://api.trongrid.io',
     'ADMIN_API_TOKEN=a-long-random-secret',
     'WEBHOOK_URL=https://your-app.example.com/webhooks/tron',
@@ -346,7 +347,7 @@ function Configure() {
         </div>
         <div>
           <code>TRONGRID_API_KEY_SCANNER</code>
-          <span>Your TronGrid API key. Required on mainnet.</span>
+          <span>Your TronGrid API key, or comma-separated keys for round-robin use. Required on mainnet.</span>
         </div>
         <div>
           <code>TRONGRID_BASE_URL</code>

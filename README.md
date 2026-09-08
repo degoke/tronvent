@@ -344,7 +344,7 @@ Reference: [TRON network endpoints](https://developers.tron.network/docs/connect
 | Variable | Description |
 |---|---|
 | `DATABASE_URL` | PostgreSQL connection string |
-| `TRONGRID_API_KEY_SCANNER` | TronGrid API key (`TRON-PRO-API-KEY` header) |
+| `TRONGRID_API_KEY_SCANNER` | TronGrid API key(s), comma-separated for a round-robin pool (`TRON-PRO-API-KEY` header) |
 
 ### TronGrid & polling
 

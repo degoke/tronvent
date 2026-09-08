@@ -151,6 +151,7 @@ type Poller struct {
 	contracts  contractLister
 	httpClient *http.Client
 	sem        chan struct{}
+	keys       *tronGridAPIKeyPool
 }
 
 // NewPoller creates a Poller wired to Postgres cursors and the webhook outbox.
@@ -165,7 +166,8 @@ func NewPoller(
 	if concurrency <= 0 {
 		concurrency = 5
 	}
-	slog.Info("poller configured", "fetchConcurrency", concurrency)
+	keys := newTronGridAPIKeyPool(cfg.TronGridAPIKey)
+	slog.Info("poller configured", "fetchConcurrency", concurrency, "tronGridApiKeys", keys.count())
 	return &Poller{
 		cfg:        cfg,
 		db:         db,
@@ -174,6 +176,7 @@ func NewPoller(
 		contracts:  contracts,
 		httpClient: &http.Client{Timeout: time.Duration(cfg.HTTPTimeoutSeconds) * time.Second},
 		sem:        make(chan struct{}, concurrency),
+		keys:       keys,
 	}
 }
 
@@ -1008,23 +1011,28 @@ func (p *Poller) tronGridDo(ctx context.Context, method, url string, reqBody any
 	}
 	defer func() { <-p.sem }()
 
+	keys := p.keys
+	if keys == nil {
+		// Keep Poller literals in tests and downstream packages compatible with
+		// the key pool introduced after the original single-key field.
+		keys = newTronGridAPIKeyPool(p.cfg.TronGridAPIKey)
+	}
+
 	const maxRetries = 4
 	backoff := 500 * time.Millisecond
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		if attempt > 0 {
-			slog.Warn(
-				"TronGrid rate limited, backing off",
-				"method", method,
-				"url", url,
-				"attempt", attempt,
-				"backoff", backoff,
-			)
 			select {
 			case <-time.After(backoff):
 			case <-ctx.Done():
 				return ctx.Err()
 			}
 			backoff *= 2
+		}
+
+		keyIndex, apiKey, err := keys.nextAvailable(ctx)
+		if err != nil {
+			return err
 		}
 
 		var bodyReader io.Reader
@@ -1043,14 +1051,28 @@ func (p *Poller) tronGridDo(ctx context.Context, method, url string, reqBody any
 		if reqBody != nil {
 			req.Header.Set("Content-Type", "application/json")
 		}
-		if p.cfg.TronGridAPIKey != "" {
-			req.Header.Set("TRON-PRO-API-KEY", p.cfg.TronGridAPIKey)
+		if apiKey != "" {
+			req.Header.Set("TRON-PRO-API-KEY", apiKey)
 		}
 		resp, err := p.httpClient.Do(req)
 		if err != nil {
 			return fmt.Errorf("%s %s: %w", method, url, err)
 		}
 		if resp.StatusCode == http.StatusTooManyRequests {
+			retryAfter := retryAfterDuration(resp.Header.Get("Retry-After"), time.Now())
+			if retryAfter <= 0 {
+				retryAfter = backoff
+			}
+			keys.cooldown(keyIndex, retryAfter)
+			slog.Warn(
+				"TronGrid rate limited, backing off",
+				"method", method,
+				"url", url,
+				"key", keys.label(keyIndex),
+				"attempt", attempt+1,
+				"cooldown", retryAfter,
+				"backoff", backoff,
+			)
 			_ = resp.Body.Close()
 			continue
 		}
