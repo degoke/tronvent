@@ -79,35 +79,28 @@ func main() {
 	contractStore := store.NewContractStore(db)
 	webhookStore := store.NewWebhookConfigStore(db)
 
-	if err := addressStore.Reload(ctx); err != nil {
-		slog.Error("load watched addresses", "err", err)
-		os.Exit(1)
-	}
-	if err := contractStore.Reload(ctx); err != nil {
-		slog.Error("load watched contracts", "err", err)
-		os.Exit(1)
-	}
-	if err := webhookStore.Reload(ctx); err != nil {
-		slog.Error("load webhook config", "err", err)
-		os.Exit(1)
-	}
-	if webhookCfg != nil {
-		webhookStore.Set(webhookCfg)
-	}
-
-	reloadAll := func(reason string) {
+	reloadAll := func(reason string) error {
+		var firstErr error
 		if err := addressStore.Reload(ctx); err != nil {
 			slog.Error("reload addresses", "reason", reason, "err", err)
+			firstErr = err
 		}
 		if err := contractStore.Reload(ctx); err != nil {
 			slog.Error("reload contracts", "reason", reason, "err", err)
+			if firstErr == nil {
+				firstErr = err
+			}
 		}
 		if err := webhookStore.Reload(ctx); err != nil {
 			slog.Error("reload webhook config", "reason", reason, "err", err)
+			if firstErr == nil {
+				firstErr = err
+			}
 		}
+		return firstErr
 	}
 
-	listener := pgnotify.New(db.Pool, []string{
+	listener := pgnotify.New(cfg.DatabaseURL, []string{
 		internaldb.NotifyAddressesChanged,
 		internaldb.NotifyContractsChanged,
 		internaldb.NotifyWebhookChanged,
@@ -127,8 +120,35 @@ func main() {
 				slog.Error("notify reload webhook", "err", err)
 			}
 		}
+	}, func(ctx context.Context) error {
+		slog.Info("pgnotify reconnected, reloading stores")
+		return reloadAll("listener reconnect")
 	})
 	go listener.Run(ctx)
+
+	listenerStartupCtx, cancelListenerStartup := context.WithTimeout(ctx, 30*time.Second)
+	if err := listener.WaitForReady(listenerStartupCtx); err != nil {
+		cancelListenerStartup()
+		slog.Error("pgnotify initial connection failed", "err", err)
+		os.Exit(1)
+	}
+	cancelListenerStartup()
+
+	if err := addressStore.Reload(ctx); err != nil {
+		slog.Error("load watched addresses", "err", err)
+		os.Exit(1)
+	}
+	if err := contractStore.Reload(ctx); err != nil {
+		slog.Error("load watched contracts", "err", err)
+		os.Exit(1)
+	}
+	if err := webhookStore.Reload(ctx); err != nil {
+		slog.Error("load webhook config", "err", err)
+		os.Exit(1)
+	}
+	if webhookCfg != nil {
+		webhookStore.Set(webhookCfg)
+	}
 
 	if cfg.StateResyncIntervalSeconds > 0 {
 		resyncInterval := time.Duration(cfg.StateResyncIntervalSeconds) * time.Second
@@ -140,7 +160,9 @@ func main() {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					reloadAll("periodic")
+					if err := reloadAll("periodic"); err != nil {
+						slog.Error("periodic store reload failed", "err", err)
+					}
 				}
 			}
 		}()
