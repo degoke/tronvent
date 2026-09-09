@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,12 +18,13 @@ import (
 )
 
 type memDB struct {
-	addresses     []internaldb.WatchedAddress
-	contracts     []internaldb.WatchedContract
-	webhook       *internaldb.WebhookConfig
-	cursors       []internaldb.CursorRow
-	retries       []internaldb.RetryJobRecord
-	webhookEvents []internaldb.DashboardWebhookEvent
+	addresses       []internaldb.WatchedAddress
+	contracts       []internaldb.WatchedContract
+	webhook         *internaldb.WebhookConfig
+	cursors         []internaldb.CursorRow
+	retries         []internaldb.RetryJobRecord
+	webhookEvents   []internaldb.DashboardWebhookEvent
+	webhookAttempts map[string][]internaldb.DashboardDeliveryAttempt
 }
 
 func (m *memDB) ListActiveAddresses(_ context.Context) ([]string, error) {
@@ -230,7 +232,7 @@ func (m *memDB) ListWebhookEvents(_ context.Context, status string, limit int) (
 }
 
 func (m *memDB) ListWebhookDeliveryAttempts(_ context.Context, eventID string) ([]internaldb.DashboardDeliveryAttempt, error) {
-	return nil, nil
+	return m.webhookAttempts[eventID], nil
 }
 
 func (m *memDB) RetryWebhookEvent(_ context.Context, eventID string) error {
@@ -337,6 +339,94 @@ func TestPutWebhookUpdatesConfig(t *testing.T) {
 	}
 	if mem.webhook == nil || mem.webhook.WebhookURL != "https://example.com/hook" {
 		t.Fatal("webhook config not saved")
+	}
+}
+
+func TestGetWebhookEventsAPI(t *testing.T) {
+	mem := &memDB{webhookEvents: []internaldb.DashboardWebhookEvent{
+		{ID: "ev-failed", Status: "failed", TxHash: "tx-failed"},
+		{ID: "ev-delivered", Status: "delivered", TxHash: "tx-delivered"},
+	}}
+	srv := newTestServer(t, mem)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/webhooks?status=failed", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		Items []struct {
+			ID string `json:"id"`
+		} `json:"items"`
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Status != "failed" || len(response.Items) != 1 || response.Items[0].ID != "ev-failed" {
+		t.Fatalf("unexpected response: %+v", response)
+	}
+}
+
+func TestGetWebhookEventAttemptsAPI(t *testing.T) {
+	createdAt := time.Now()
+	mem := &memDB{webhookAttempts: map[string][]internaldb.DashboardDeliveryAttempt{
+		"ev-1": {{ID: "attempt-1", AttemptNumber: 1, CreatedAt: createdAt}},
+	}}
+	srv := newTestServer(t, mem)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/webhooks/ev-1/attempts", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "attempt-1") {
+		t.Fatalf("expected attempt in response, got %s", rec.Body.String())
+	}
+}
+
+func TestRetryWebhookEventAPI(t *testing.T) {
+	mem := &memDB{webhookEvents: []internaldb.DashboardWebhookEvent{
+		{ID: "ev-1", Status: "dead", AttemptCount: 8},
+	}}
+	srv := newTestServer(t, mem)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/ev-1/retry", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if mem.webhookEvents[0].Status != "pending" || mem.webhookEvents[0].AttemptCount != 0 {
+		t.Fatalf("expected event reset, got %+v", mem.webhookEvents[0])
+	}
+}
+
+func TestRetryAllWebhookEventsAPI(t *testing.T) {
+	mem := &memDB{webhookEvents: []internaldb.DashboardWebhookEvent{
+		{ID: "ev-failed", Status: "failed", AttemptCount: 2},
+		{ID: "ev-dead", Status: "dead", AttemptCount: 8},
+		{ID: "ev-delivered", Status: "delivered", AttemptCount: 1},
+	}}
+	srv := newTestServer(t, mem)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/retry-all", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if mem.webhookEvents[0].Status != "pending" || mem.webhookEvents[1].Status != "pending" {
+		t.Fatalf("expected failed/dead events reset: %+v", mem.webhookEvents)
+	}
+	if mem.webhookEvents[2].Status != "delivered" {
+		t.Fatal("expected delivered event unchanged")
 	}
 }
 

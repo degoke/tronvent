@@ -397,6 +397,10 @@ All `/api/v1/*` routes require `Authorization: Bearer <ADMIN_API_TOKEN>`.
 | `DELETE` | `/api/v1/contracts/{contractAddress}` | Deactivate contract |
 | `PUT` | `/api/v1/webhook` | Set webhook URL and signing secret |
 | `GET` | `/api/v1/webhook` | Get webhook config (secret not returned) |
+| `GET` | `/api/v1/webhooks?status=failed&limit=50` | List webhook events (`status=dead` or `status=all` are also supported) |
+| `GET` | `/api/v1/webhooks/{eventID}/attempts` | List delivery attempts for one webhook event |
+| `POST` | `/api/v1/webhooks/{eventID}/retry` | Retry one failed or dead webhook event |
+| `POST` | `/api/v1/webhooks/retry-all` | Retry all failed and dead webhook events |
 | `GET` | `/api/v1/runtime` | Cursors, watchlist counts, active contracts |
 | `POST` | `/api/v1/retries/block` | Replay a single block |
 | `POST` | `/api/v1/retries/range` | Replay a block range |
