@@ -109,9 +109,11 @@ func TestWorkerRetriesOn5xx(t *testing.T) {
 }
 
 type retryDB struct {
-	event   internaldb.WebhookEvent
-	claimed bool
-	onFail  func()
+	event         internaldb.WebhookEvent
+	claimed       bool
+	onFail        func()
+	attemptNumber int
+	maxAttempts   int
 }
 
 func (r *retryDB) ClaimPendingWebhookEvents(_ context.Context, limit int) ([]internaldb.WebhookEvent, error) {
@@ -127,6 +129,8 @@ func (r *retryDB) MarkWebhookEventDelivered(_ context.Context, id string, respon
 }
 
 func (r *retryDB) MarkWebhookEventFailed(_ context.Context, id string, attemptNumber int, responseCode *int, errMsg string, nextAttempt time.Time, maxAttempts int) error {
+	r.attemptNumber = attemptNumber
+	r.maxAttempts = maxAttempts
 	if r.onFail != nil {
 		r.onFail()
 	}
@@ -135,4 +139,29 @@ func (r *retryDB) MarkWebhookEventFailed(_ context.Context, id string, attemptNu
 
 func (r *retryDB) RecordWebhookDeliveryAttempt(_ context.Context, eventID string, attemptNumber int, reqHeaders, reqBody json.RawMessage, responseCode *int, responseBody, errMsg string, durationMs int) error {
 	return nil
+}
+
+func TestWorkerManualRetryAfterMaximumUsesNextAttemptOnce(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	cfgStore := store.NewWebhookConfigStore(nil)
+	cfgStore.Set(&internaldb.WebhookConfig{WebhookURL: srv.URL, SigningSecret: "secret", IsActive: true})
+	payload, _ := json.Marshal(map[string]string{"type": "TRX"})
+	db := &retryDB{
+		event: internaldb.WebhookEvent{
+			ID: "evt-dead", EventType: "TRX", Scope: "TRX", TxHash: "dead", Payload: payload,
+			AttemptCount: 8,
+		},
+	}
+
+	worker := webhook.NewWorker(&config.Config{WebhookMaxAttempts: 8}, db, cfgStore)
+	if err := worker.DispatchOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if db.attemptNumber != 9 || db.maxAttempts != 8 {
+		t.Fatalf("expected one forced attempt at number 9 with max 8, got attempt=%d max=%d", db.attemptNumber, db.maxAttempts)
+	}
 }

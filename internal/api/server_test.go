@@ -244,7 +244,6 @@ func (m *memDB) RetryWebhookEvent(_ context.Context, eventID string) error {
 			return internaldb.ErrWebhookEventNotFound
 		}
 		m.webhookEvents[i].Status = "pending"
-		m.webhookEvents[i].AttemptCount = 0
 		return nil
 	}
 	return internaldb.ErrWebhookEventNotFound
@@ -255,7 +254,6 @@ func (m *memDB) RetryAllFailedDeadWebhookEvents(_ context.Context) (int64, error
 	for i, ev := range m.webhookEvents {
 		if ev.Status == "failed" || ev.Status == "dead" {
 			m.webhookEvents[i].Status = "pending"
-			m.webhookEvents[i].AttemptCount = 0
 			count++
 		}
 	}
@@ -402,8 +400,8 @@ func TestRetryWebhookEventAPI(t *testing.T) {
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("expected 202, got %d body=%s", rec.Code, rec.Body.String())
 	}
-	if mem.webhookEvents[0].Status != "pending" || mem.webhookEvents[0].AttemptCount != 0 {
-		t.Fatalf("expected event reset, got %+v", mem.webhookEvents[0])
+	if mem.webhookEvents[0].Status != "pending" || mem.webhookEvents[0].AttemptCount != 8 {
+		t.Fatalf("expected event rescheduled with attempt count preserved, got %+v", mem.webhookEvents[0])
 	}
 }
 
@@ -424,6 +422,9 @@ func TestRetryAllWebhookEventsAPI(t *testing.T) {
 	}
 	if mem.webhookEvents[0].Status != "pending" || mem.webhookEvents[1].Status != "pending" {
 		t.Fatalf("expected failed/dead events reset: %+v", mem.webhookEvents)
+	}
+	if mem.webhookEvents[0].AttemptCount != 2 || mem.webhookEvents[1].AttemptCount != 8 {
+		t.Fatalf("expected attempt counts preserved: %+v", mem.webhookEvents)
 	}
 	if mem.webhookEvents[2].Status != "delivered" {
 		t.Fatal("expected delivered event unchanged")

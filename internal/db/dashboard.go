@@ -135,12 +135,11 @@ func (c *Client) ListWebhookDeliveryAttempts(ctx context.Context, eventID string
 	return out, rows.Err()
 }
 
-// RetryWebhookEvent resets a failed/dead event for a fresh delivery cycle.
+// RetryWebhookEvent schedules one immediate delivery attempt for a failed/dead event.
 func (c *Client) RetryWebhookEvent(ctx context.Context, eventID string) error {
 	tag, err := c.Pool.Exec(ctx, `
 		UPDATE webhook_events
 		SET status = 'pending',
-		    attempt_count = 0,
 		    next_attempt_at = now(),
 		    last_error = NULL,
 		    last_response_code = NULL,
@@ -156,12 +155,12 @@ func (c *Client) RetryWebhookEvent(ctx context.Context, eventID string) error {
 	return nil
 }
 
-// RetryAllFailedDeadWebhookEvents resets all failed/dead events for delivery.
+// RetryAllFailedDeadWebhookEvents schedules one immediate delivery attempt for
+// every failed/dead event.
 func (c *Client) RetryAllFailedDeadWebhookEvents(ctx context.Context) (int64, error) {
 	tag, err := c.Pool.Exec(ctx, `
 		UPDATE webhook_events
 		SET status = 'pending',
-		    attempt_count = 0,
 		    next_attempt_at = now(),
 		    last_error = NULL,
 		    last_response_code = NULL,

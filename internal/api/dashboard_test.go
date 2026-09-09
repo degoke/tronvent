@@ -340,8 +340,8 @@ func TestDashboardWebhookRetryEvent(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
-	if mem.webhookEvents[0].Status != "pending" || mem.webhookEvents[0].AttemptCount != 0 {
-		t.Fatal("expected failed event reset to pending with attempt_count 0")
+	if mem.webhookEvents[0].Status != "pending" || mem.webhookEvents[0].AttemptCount != 3 {
+		t.Fatal("expected failed event rescheduled with attempt_count preserved")
 	}
 	if mem.webhookEvents[1].Status != "delivered" {
 		t.Fatal("expected delivered event unchanged")
