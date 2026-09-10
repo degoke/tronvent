@@ -2,7 +2,7 @@
 
 ![Tronvent](tronvent.png)
 
-[![License: Elastic-2.0](https://img.shields.io/badge/License-Elastic--2.0-005571.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![TRON](https://img.shields.io/badge/TRON-TronGrid-red?logo=bitcoin&logoColor=white)](https://www.trongrid.io/)
 [![Docker](https://img.shields.io/badge/Docker-ghcr.io%2Fdegoke%2Ftronvent-2496ED?logo=docker&logoColor=white)](https://ghcr.io/degoke/tronvent)
@@ -510,4 +510,4 @@ The alternative — running a TRON full node with [ZeroMQ event subscription](ht
 
 ## License
 
-[Elastic License 2.0](LICENSE)
+[MIT License](LICENSE)
