@@ -20,7 +20,7 @@ import (
 type memDB struct {
 	addresses       []internaldb.WatchedAddress
 	contracts       []internaldb.WatchedContract
-	webhook         *internaldb.WebhookConfig
+	webhookEndpoints []internaldb.WebhookEndpoint
 	cursors         []internaldb.CursorRow
 	retries         []internaldb.RetryJobRecord
 	webhookEvents   []internaldb.DashboardWebhookEvent
@@ -47,8 +47,8 @@ func (m *memDB) ListActiveContracts(_ context.Context) ([]string, error) {
 	return out, nil
 }
 
-func (m *memDB) GetWebhookConfig(_ context.Context) (*internaldb.WebhookConfig, error) {
-	return m.webhook, nil
+func (m *memDB) ListWebhookEndpoints(_ context.Context) ([]internaldb.WebhookEndpoint, error) {
+	return m.webhookEndpoints, nil
 }
 
 func (m *memDB) AddWatchedAddress(_ context.Context, address, source string) (internaldb.WatchedAddress, bool, error) {
@@ -131,12 +131,46 @@ func (m *memDB) ListContracts(_ context.Context, status string, limit int, after
 	return out, nil
 }
 
-func (m *memDB) UpsertWebhookConfig(_ context.Context, webhookURL, signingSecret string, isActive bool, source string) (*internaldb.WebhookConfig, error) {
-	cfg := &internaldb.WebhookConfig{
-		WebhookURL: webhookURL, SigningSecret: signingSecret, IsActive: isActive, Source: source, UpdatedAt: time.Now(),
+func (m *memDB) GetWebhookEndpoint(_ context.Context, endpointID string) (*internaldb.WebhookEndpoint, error) {
+	eps, _ := m.ListWebhookEndpoints(context.Background())
+	for _, ep := range eps {
+		if ep.ID == endpointID {
+			return &ep, nil
+		}
 	}
-	m.webhook = cfg
-	return cfg, nil
+	return nil, nil
+}
+
+func (m *memDB) DeleteWebhookEndpoint(_ context.Context, endpointID string) error {
+	return internaldb.ErrWebhookEndpointNotFound
+}
+
+func (m *memDB) UpsertWebhookEndpoint(_ context.Context, ep internaldb.WebhookEndpoint) (*internaldb.WebhookEndpoint, error) {
+	if ep.ID == "" {
+		ep.ID = "ep-1"
+	}
+	for i, cur := range m.webhookEndpoints {
+		if cur.ID == ep.ID {
+			m.webhookEndpoints[i] = ep
+			return &ep, nil
+		}
+	}
+	m.webhookEndpoints = append(m.webhookEndpoints, ep)
+	return &ep, nil
+}
+
+func (m *memDB) UpsertPrimaryWebhookEndpointPreserveSecret(_ context.Context, webhookURL, signingSecret string, isActive bool, source string, eventTypes []string) (*internaldb.WebhookEndpoint, error) {
+	ep := internaldb.WebhookEndpoint{
+		WebhookURL: webhookURL, SigningSecret: signingSecret, EventTypes: eventTypes,
+		IsActive: isActive, Source: source, UpdatedAt: time.Now(),
+	}
+	if len(m.webhookEndpoints) > 0 {
+		ep.ID = m.webhookEndpoints[0].ID
+		if signingSecret == "" {
+			ep.SigningSecret = m.webhookEndpoints[0].SigningSecret
+		}
+	}
+	return m.UpsertWebhookEndpoint(context.Background(), ep)
 }
 
 func (m *memDB) DeactivateWatchedAddress(_ context.Context, address string) (internaldb.WatchedAddress, error) {
@@ -208,13 +242,6 @@ func (m *memDB) ListRetryJobs(_ context.Context, status string, limit int) ([]in
 		}
 	}
 	return out, nil
-}
-
-func (m *memDB) UpsertWebhookConfigPreserveSecret(_ context.Context, webhookURL, signingSecret string, isActive bool, source string) (*internaldb.WebhookConfig, error) {
-	if signingSecret == "" && m.webhook != nil {
-		signingSecret = m.webhook.SigningSecret
-	}
-	return m.UpsertWebhookConfig(context.Background(), webhookURL, signingSecret, isActive, source)
 }
 
 func (m *memDB) ListWebhookEvents(_ context.Context, status string, limit int) ([]internaldb.DashboardWebhookEvent, error) {
@@ -335,7 +362,7 @@ func TestPutWebhookUpdatesConfig(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
 	}
-	if mem.webhook == nil || mem.webhook.WebhookURL != "https://example.com/hook" {
+	if len(mem.webhookEndpoints) == 0 || mem.webhookEndpoints[0].WebhookURL != "https://example.com/hook" {
 		t.Fatal("webhook config not saved")
 	}
 }

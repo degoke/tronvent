@@ -7,58 +7,101 @@ import (
 	internaldb "github.com/degoke/tronvent/internal/db"
 )
 
-// WebhookLoader loads webhook config from Postgres.
+// WebhookLoader loads webhook endpoints from Postgres.
 type WebhookLoader interface {
-	GetWebhookConfig(ctx context.Context) (*internaldb.WebhookConfig, error)
+	ListWebhookEndpoints(ctx context.Context) ([]internaldb.WebhookEndpoint, error)
 }
 
-// WebhookConfigStore holds the active webhook config in memory.
+// WebhookConfigStore holds webhook endpoints in memory.
 type WebhookConfigStore struct {
-	mu   sync.RWMutex
-	cfg  *internaldb.WebhookConfig
-	load WebhookLoader
+	mu      sync.RWMutex
+	byID    map[string]internaldb.WebhookEndpoint
+	ordered []internaldb.WebhookEndpoint
+	load    WebhookLoader
 }
 
 // NewWebhookConfigStore creates an empty WebhookConfigStore.
 func NewWebhookConfigStore(loader WebhookLoader) *WebhookConfigStore {
-	return &WebhookConfigStore{load: loader}
+	return &WebhookConfigStore{load: loader, byID: map[string]internaldb.WebhookEndpoint{}}
 }
 
-// Reload replaces the in-memory webhook config from Postgres.
+// Reload replaces in-memory webhook endpoints from Postgres.
 func (s *WebhookConfigStore) Reload(ctx context.Context) error {
-	cfg, err := s.load.GetWebhookConfig(ctx)
+	eps, err := s.load.ListWebhookEndpoints(ctx)
 	if err != nil {
 		return err
 	}
+	byID := make(map[string]internaldb.WebhookEndpoint, len(eps))
+	for _, ep := range eps {
+		byID[ep.ID] = ep
+	}
 	s.mu.Lock()
-	s.cfg = cfg
+	s.byID = byID
+	s.ordered = eps
 	s.mu.Unlock()
 	return nil
 }
 
-// Set updates the in-memory config after a successful DB write.
-func (s *WebhookConfigStore) Set(cfg *internaldb.WebhookConfig) {
+// UpsertEndpoint updates memory for one endpoint.
+func (s *WebhookConfigStore) UpsertEndpoint(ep internaldb.WebhookEndpoint) {
 	s.mu.Lock()
-	s.cfg = cfg
+	s.byID[ep.ID] = ep
+	found := false
+	for i, cur := range s.ordered {
+		if cur.ID == ep.ID {
+			s.ordered[i] = ep
+			found = true
+			break
+		}
+	}
+	if !found {
+		s.ordered = append(s.ordered, ep)
+	}
 	s.mu.Unlock()
 }
 
-// Get returns a copy of the current webhook config, or nil if unset.
-func (s *WebhookConfigStore) Get() *internaldb.WebhookConfig {
+// GetPrimaryEndpoint returns the oldest configured endpoint (first in list order), or nil.
+func (s *WebhookConfigStore) GetPrimaryEndpoint() *internaldb.WebhookEndpoint {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if s.cfg == nil {
+	if len(s.ordered) == 0 {
 		return nil
 	}
-	cp := *s.cfg
+	ep := s.ordered[0]
+	return &ep
+}
+
+// GetEndpoint returns a configured endpoint by id.
+func (s *WebhookConfigStore) GetEndpoint(id string) *internaldb.WebhookEndpoint {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	ep, ok := s.byID[id]
+	if !ok {
+		return nil
+	}
+	cp := ep
 	return &cp
 }
 
-// PublicView returns webhook config without the signing secret.
+// RemoveEndpoint drops an endpoint from memory after deletion.
+func (s *WebhookConfigStore) RemoveEndpoint(id string) {
+	s.mu.Lock()
+	delete(s.byID, id)
+	filtered := make([]internaldb.WebhookEndpoint, 0, len(s.ordered))
+	for _, ep := range s.ordered {
+		if ep.ID != id {
+			filtered = append(filtered, ep)
+		}
+	}
+	s.ordered = filtered
+	s.mu.Unlock()
+}
+
+// PublicView returns the primary endpoint without the signing secret.
 func (s *WebhookConfigStore) PublicView() (webhookURL string, isActive bool, updatedAt string, ok bool) {
-	cfg := s.Get()
-	if cfg == nil {
+	ep := s.GetPrimaryEndpoint()
+	if ep == nil {
 		return "", false, "", false
 	}
-	return cfg.WebhookURL, cfg.IsActive, cfg.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"), true
+	return ep.WebhookURL, ep.IsActive, ep.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"), true
 }

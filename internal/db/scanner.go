@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/degoke/tronvent/internal/webhookspec"
+	"github.com/degoke/tronvent/internal/webhookpayload"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -35,14 +37,6 @@ type WatchedContract struct {
 	UpdatedAt       time.Time
 }
 
-type WebhookConfig struct {
-	WebhookURL    string
-	SigningSecret string
-	IsActive      bool
-	Source        string
-	UpdatedAt     time.Time
-}
-
 type WebhookEvent struct {
 	ID             string
 	EventType      string
@@ -55,6 +49,8 @@ type WebhookEvent struct {
 	Status         string
 	AttemptCount   int
 	NextAttemptAt  time.Time
+	CreatedAt      time.Time
+	EndpointID     string
 }
 
 type CursorRow struct {
@@ -487,102 +483,100 @@ func (c *Client) ListCursors(ctx context.Context) ([]CursorRow, error) {
 	return out, rows.Err()
 }
 
-// GetWebhookConfig loads the singleton webhook config row.
-func (c *Client) GetWebhookConfig(ctx context.Context) (*WebhookConfig, error) {
-	var cfg WebhookConfig
-	err := c.Pool.QueryRow(ctx, `
-		SELECT webhook_url, signing_secret, is_active, source, updated_at
-		FROM scanner_webhook_config WHERE id = true
-	`).Scan(&cfg.WebhookURL, &cfg.SigningSecret, &cfg.IsActive, &cfg.Source, &cfg.UpdatedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
+func nullIfEmpty(s string) any {
+	if s == "" {
+		return nil
 	}
-	if err != nil {
-		return nil, fmt.Errorf("GetWebhookConfig: %w", err)
-	}
-	return &cfg, nil
+	return s
 }
 
-// BootstrapWebhookConfig inserts env defaults when no row exists.
-func (c *Client) BootstrapWebhookConfig(ctx context.Context, webhookURL, signingSecret string) (*WebhookConfig, error) {
-	existing, err := c.GetWebhookConfig(ctx)
-	if err != nil {
-		return nil, err
+// DeactivateWebhook disables delivery for one endpoint or all endpoints when endpointID is empty.
+func (c *Client) DeactivateWebhook(ctx context.Context, endpointID, reason string) error {
+	if endpointID != "" {
+		return c.DeactivateWebhookEndpoint(ctx, endpointID, reason)
 	}
-	if existing != nil {
-		return existing, nil
-	}
-	if webhookURL == "" || signingSecret == "" {
-		return nil, nil
-	}
-	return c.UpsertWebhookConfig(ctx, webhookURL, signingSecret, true, "env")
-}
-
-// UpsertWebhookConfig updates the singleton webhook config and notifies listeners.
-func (c *Client) UpsertWebhookConfig(ctx context.Context, webhookURL, signingSecret string, isActive bool, source string) (*WebhookConfig, error) {
 	tx, err := c.Pool.Begin(ctx)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-
-	var cfg WebhookConfig
-	err = tx.QueryRow(ctx, `
-		INSERT INTO scanner_webhook_config (id, webhook_url, signing_secret, is_active, source, updated_at)
-		VALUES (true, $1, $2, $3, $4, now())
-		ON CONFLICT (id) DO UPDATE SET
-			webhook_url = EXCLUDED.webhook_url,
-			signing_secret = EXCLUDED.signing_secret,
-			is_active = EXCLUDED.is_active,
-			source = EXCLUDED.source,
-			updated_at = now()
-		RETURNING webhook_url, signing_secret, is_active, source, updated_at
-	`, webhookURL, signingSecret, isActive, source).Scan(&cfg.WebhookURL, &cfg.SigningSecret, &cfg.IsActive, &cfg.Source, &cfg.UpdatedAt)
-	if err != nil {
-		return nil, fmt.Errorf("UpsertWebhookConfig: %w", err)
+	if _, err := tx.Exec(ctx, `UPDATE webhook_endpoints SET is_active = false, updated_at = now()`); err != nil {
+		return fmt.Errorf("DeactivateWebhook: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `SELECT pg_notify($1, $2)`, NotifyWebhookChanged, `{"reason":"reload"}`); err != nil {
-		return nil, fmt.Errorf("notify webhook: %w", err)
+	if _, err := tx.Exec(ctx, `SELECT pg_notify($1, $2)`, NotifyWebhookChanged, fmt.Sprintf(`{"reason":"%s"}`, reason)); err != nil {
+		return fmt.Errorf("notify webhook deactivate: %w", err)
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, err
-	}
-	return &cfg, nil
+	return tx.Commit(ctx)
 }
 
 // EnqueueWebhookEvent inserts a matched event into the outbox (deduplicated).
 // The event id is generated here and injected into the payload before storage.
 func (c *Client) EnqueueWebhookEvent(ctx context.Context, eventType, scope, txHash string, blockNumber, blockTimestamp int64, payload any) (string, error) {
-	id := newUUID()
-	payloadMap := map[string]any{}
-	if payload != nil {
-		raw, err := json.Marshal(payload)
-		if err != nil {
-			return "", fmt.Errorf("marshal payload: %w", err)
-		}
-		if err := json.Unmarshal(raw, &payloadMap); err != nil {
-			return "", fmt.Errorf("unmarshal payload: %w", err)
-		}
-	}
-	payloadMap["id"] = id
-	data, err := json.Marshal(payloadMap)
+	endpoints, err := c.ListWebhookEndpoints(ctx)
 	if err != nil {
-		return "", fmt.Errorf("marshal payload with id: %w", err)
+		return "", err
 	}
-	dedupeKey := fmt.Sprintf("%s:%s", scope, txHash)
-	tag, err := c.Pool.Exec(ctx, `
-		INSERT INTO webhook_events (
-			id, event_type, scope, tx_hash, block_number, block_timestamp, payload, dedupe_key
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		ON CONFLICT (dedupe_key) DO NOTHING
-	`, id, eventType, scope, txHash, blockNumber, blockTimestamp, data, dedupeKey)
-	if err != nil {
-		return "", fmt.Errorf("EnqueueWebhookEvent: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
+	if len(endpoints) == 0 {
 		return "", nil
 	}
-	return id, nil
+	stdType := webhookpayload.TransactionType(eventType)
+
+	var firstID string
+	enqueued := 0
+	for _, ep := range endpoints {
+		if !ep.IsActive || !ep.SubscribesTo(stdType) {
+			continue
+		}
+		id := newUUID()
+		payloadMap := map[string]any{}
+		if payload != nil {
+			raw, err := json.Marshal(payload)
+			if err != nil {
+				return firstID, fmt.Errorf("marshal payload: %w", err)
+			}
+			if err := json.Unmarshal(raw, &payloadMap); err != nil {
+				return firstID, fmt.Errorf("unmarshal payload: %w", err)
+			}
+		}
+		dataObj, ok := payloadMap["data"].(map[string]any)
+		if !ok {
+			return firstID, fmt.Errorf("webhook payload must include a data object")
+		}
+		dataObj["id"] = id
+		data, err := json.Marshal(payloadMap)
+		if err != nil {
+			return firstID, fmt.Errorf("marshal payload with id: %w", err)
+		}
+		if err := webhookspec.ValidatePayloadSize(data); err != nil {
+			return firstID, err
+		}
+		var endpointID any
+		dedupeKey := fmt.Sprintf("%s:%s", scope, txHash)
+		if ep.ID != "" {
+			endpointID = ep.ID
+			dedupeKey = fmt.Sprintf("%s:%s:%s", scope, txHash, ep.ID)
+		}
+		tag, err := c.Pool.Exec(ctx, `
+			INSERT INTO webhook_events (
+				id, event_type, scope, tx_hash, block_number, block_timestamp, payload, dedupe_key, endpoint_id
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			ON CONFLICT (dedupe_key) DO NOTHING
+		`, id, eventType, scope, txHash, blockNumber, blockTimestamp, data, dedupeKey, endpointID)
+		if err != nil {
+			return firstID, fmt.Errorf("EnqueueWebhookEvent: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			continue
+		}
+		enqueued++
+		if firstID == "" {
+			firstID = id
+		}
+	}
+	if enqueued == 0 {
+		return "", nil
+	}
+	return firstID, nil
 }
 
 // ClaimPendingWebhookEvents claims pending/failed events ready for delivery.
@@ -602,7 +596,8 @@ func (c *Client) ClaimPendingWebhookEvents(ctx context.Context, limit int) ([]We
 			FOR UPDATE SKIP LOCKED
 		)
 		RETURNING id::text, event_type, scope, tx_hash, block_number, block_timestamp,
-		          payload, dedupe_key, status, attempt_count, next_attempt_at
+		          payload, dedupe_key, status, attempt_count, next_attempt_at, created_at,
+		          COALESCE(endpoint_id::text, '')
 	`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("ClaimPendingWebhookEvents: %w", err)
@@ -614,7 +609,8 @@ func (c *Client) ClaimPendingWebhookEvents(ctx context.Context, limit int) ([]We
 		var ev WebhookEvent
 		if err := rows.Scan(
 			&ev.ID, &ev.EventType, &ev.Scope, &ev.TxHash, &ev.BlockNumber, &ev.BlockTimestamp,
-			&ev.Payload, &ev.DedupeKey, &ev.Status, &ev.AttemptCount, &ev.NextAttemptAt,
+			&ev.Payload, &ev.DedupeKey, &ev.Status, &ev.AttemptCount, &ev.NextAttemptAt, &ev.CreatedAt,
+			&ev.EndpointID,
 		); err != nil {
 			return nil, fmt.Errorf("ClaimPendingWebhookEvents scan: %w", err)
 		}

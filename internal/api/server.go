@@ -26,8 +26,11 @@ type DB interface {
 	AddWatchedContract(ctx context.Context, contractAddress, tokenSymbol, source string) (internaldb.WatchedContract, bool, error)
 	DeactivateWatchedContract(ctx context.Context, contractAddress string) (internaldb.WatchedContract, error)
 	ListContracts(ctx context.Context, status string, limit int, afterContract, search string) ([]internaldb.WatchedContract, error)
-	UpsertWebhookConfig(ctx context.Context, webhookURL, signingSecret string, isActive bool, source string) (*internaldb.WebhookConfig, error)
-	UpsertWebhookConfigPreserveSecret(ctx context.Context, webhookURL, signingSecret string, isActive bool, source string) (*internaldb.WebhookConfig, error)
+	UpsertPrimaryWebhookEndpointPreserveSecret(ctx context.Context, webhookURL, signingSecret string, isActive bool, source string, eventTypes []string) (*internaldb.WebhookEndpoint, error)
+	ListWebhookEndpoints(ctx context.Context) ([]internaldb.WebhookEndpoint, error)
+	GetWebhookEndpoint(ctx context.Context, endpointID string) (*internaldb.WebhookEndpoint, error)
+	UpsertWebhookEndpoint(ctx context.Context, ep internaldb.WebhookEndpoint) (*internaldb.WebhookEndpoint, error)
+	DeleteWebhookEndpoint(ctx context.Context, endpointID string) error
 	ListCursors(ctx context.Context) ([]internaldb.CursorRow, error)
 	EnqueueRetryJob(ctx context.Context, fromBlock, toBlock int64) (internaldb.EnqueueRetryResult, error)
 	ListRetryJobs(ctx context.Context, status string, limit int) ([]internaldb.RetryJobRecord, error)
@@ -82,6 +85,13 @@ func New(
 	mux.HandleFunc("DELETE /api/v1/contracts/{contractAddress}", s.requireAuth(s.handleDeleteContract))
 	mux.HandleFunc("PUT /api/v1/webhook", s.requireAuth(s.handlePutWebhook))
 	mux.HandleFunc("GET /api/v1/webhook", s.requireAuth(s.handleGetWebhook))
+	mux.HandleFunc("GET /api/v1/webhook/endpoints", s.requireAuth(s.handleListWebhookEndpoints))
+	mux.HandleFunc("POST /api/v1/webhook/endpoints", s.requireAuth(s.handlePostWebhookEndpoint))
+	mux.HandleFunc("GET /api/v1/webhook/endpoints/{endpointID}", s.requireAuth(s.handleGetWebhookEndpoint))
+	mux.HandleFunc("PATCH /api/v1/webhook/endpoints/{endpointID}", s.requireAuth(s.handlePatchWebhookEndpoint))
+	mux.HandleFunc("DELETE /api/v1/webhook/endpoints/{endpointID}", s.requireAuth(s.handleDeleteWebhookEndpoint))
+	mux.HandleFunc("GET /api/v1/webhook/schemas", s.requireAuth(s.handleListWebhookSchemas))
+	mux.HandleFunc("GET /api/v1/webhook/schemas/event", s.requireAuth(s.handleGetWebhookSchema))
 	mux.HandleFunc("GET /api/v1/webhooks", s.requireAuth(s.handleGetWebhookEvents))
 	mux.HandleFunc("GET /api/v1/webhooks/{eventID}/attempts", s.requireAuth(s.handleGetWebhookEventAttempts))
 	mux.HandleFunc("POST /api/v1/webhooks/{eventID}/retry", s.requireAuth(s.handleRetryWebhookEventAPI))
@@ -285,8 +295,9 @@ func (s *Server) handleGetContracts(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handlePutWebhook(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		WebhookURL    string `json:"webhookUrl"`
-		SigningSecret string `json:"signingSecret"`
+		WebhookURL    string   `json:"webhookUrl"`
+		SigningSecret string   `json:"signingSecret"`
+		EventTypes    []string `json:"eventTypes"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
@@ -294,22 +305,22 @@ func (s *Server) handlePutWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	req.WebhookURL = strings.TrimSpace(req.WebhookURL)
 	req.SigningSecret = strings.TrimSpace(req.SigningSecret)
-	if req.WebhookURL == "" || req.SigningSecret == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "webhookUrl and signingSecret are required"})
+	if req.WebhookURL == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "webhookUrl is required"})
 		return
 	}
 
-	cfg, err := s.db.UpsertWebhookConfig(r.Context(), req.WebhookURL, req.SigningSecret, true, "api")
+	ep, err := s.db.UpsertPrimaryWebhookEndpointPreserveSecret(r.Context(), req.WebhookURL, req.SigningSecret, true, "api", req.EventTypes)
 	if err != nil {
-		slog.Error("upsert webhook config", "err", err)
+		slog.Error("upsert webhook endpoint", "err", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save webhook config"})
 		return
 	}
-	s.webhookConfig.Set(cfg)
+	s.webhookConfig.UpsertEndpoint(*ep)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"webhookUrl": cfg.WebhookURL,
-		"isActive":   cfg.IsActive,
-		"updatedAt":  cfg.UpdatedAt.UTC().Format(time.RFC3339),
+		"webhookUrl": ep.WebhookURL,
+		"isActive":   ep.IsActive,
+		"updatedAt":  ep.UpdatedAt.UTC().Format(time.RFC3339),
 	})
 }
 

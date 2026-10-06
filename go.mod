@@ -8,6 +8,7 @@ require (
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/lmittmann/tint v1.1.3
 	github.com/prometheus/client_golang v1.22.0
+	github.com/standard-webhooks/standard-webhooks/libraries v0.0.1
 )
 
 require (

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	internaldb "github.com/degoke/tronvent/internal/db"
+	"github.com/degoke/tronvent/internal/webhookspec"
 )
 
 func TestScannerRepositoryIntegration(t *testing.T) {
@@ -57,16 +58,25 @@ func TestScannerRepositoryIntegration(t *testing.T) {
 		t.Fatal("contract not in active list")
 	}
 
-	cfg, err := client.UpsertWebhookConfig(ctx, "https://example.com/hook", "secret", true, "test")
-	if err != nil || cfg.WebhookURL == "" {
-		t.Fatalf("webhook upsert: %+v err=%v", cfg, err)
+	whsec, err := webhookspec.GenerateSigningSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ep, err := client.UpsertPrimaryWebhookEndpointPreserveSecret(ctx, "https://example.com/hook", whsec, true, "test", nil)
+	if err != nil || ep.WebhookURL == "" {
+		t.Fatalf("webhook upsert: %+v err=%v", ep, err)
 	}
 
-	evID, err := client.EnqueueWebhookEvent(ctx, "TRX", "TRX", "hash-1", 100, time.Now().UnixMilli(), map[string]string{"type": "TRX"})
+	envelope := map[string]any{
+		"type":      "transaction.trx",
+		"timestamp": "2024-06-01T12:00:00Z",
+		"data":      map[string]any{"txHash": "hash-1"},
+	}
+	evID, err := client.EnqueueWebhookEvent(ctx, "TRX", "TRX", "hash-1", 100, time.Now().UnixMilli(), envelope)
 	if err != nil || evID == "" {
 		t.Fatalf("enqueue event: id=%q err=%v", evID, err)
 	}
-	dupID, err := client.EnqueueWebhookEvent(ctx, "TRX", "TRX", "hash-1", 100, time.Now().UnixMilli(), map[string]string{"type": "TRX"})
+	dupID, err := client.EnqueueWebhookEvent(ctx, "TRX", "TRX", "hash-1", 100, time.Now().UnixMilli(), envelope)
 	if err != nil {
 		t.Fatal(err)
 	}

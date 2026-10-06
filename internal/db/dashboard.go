@@ -55,23 +55,6 @@ type DashboardQueueJob struct {
 	CompletedAt *time.Time
 }
 
-// UpsertWebhookConfigPreserveSecret updates webhook settings, keeping the existing
-// signing secret when signingSecret is empty.
-func (c *Client) UpsertWebhookConfigPreserveSecret(ctx context.Context, webhookURL, signingSecret string, isActive bool, source string) (*WebhookConfig, error) {
-	secret := signingSecret
-	if secret == "" {
-		existing, err := c.GetWebhookConfig(ctx)
-		if err != nil {
-			return nil, err
-		}
-		if existing == nil {
-			return nil, fmt.Errorf("UpsertWebhookConfigPreserveSecret: no existing webhook config")
-		}
-		secret = existing.SigningSecret
-	}
-	return c.UpsertWebhookConfig(ctx, webhookURL, secret, isActive, source)
-}
-
 // ListWebhookEvents returns recent webhook outbox rows with optional status filter.
 func (c *Client) ListWebhookEvents(ctx context.Context, status string, limit int) ([]DashboardWebhookEvent, error) {
 	if limit <= 0 {

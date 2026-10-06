@@ -14,6 +14,7 @@ import (
 	"github.com/degoke/tronvent/internal/config"
 	internaldb "github.com/degoke/tronvent/internal/db"
 	"github.com/degoke/tronvent/internal/metrics"
+	"github.com/degoke/tronvent/internal/webhookpayload"
 )
 
 // blockBatchSize is the maximum number of blocks fetched in a single
@@ -25,20 +26,6 @@ const (
 	queueTronReconcile  = "tron-reconcile"
 	queueWorkerID       = "tronvent"
 )
-
-// WebhookPayload is the signed webhook body delivered to subscribers.
-type WebhookPayload struct {
-	ID                   string `json:"id"`
-	Type                 string `json:"type"`
-	TxHash               string `json:"txHash"`
-	FromAddress          string `json:"fromAddress"`
-	ToAddress            string `json:"toAddress"`
-	Amount               string `json:"amount"`
-	TokenContractAddress string `json:"tokenContractAddress,omitempty"`
-	BlockNumber          int64  `json:"blockNumber"`
-	BlockTimestamp       int64  `json:"blockTimestamp"`
-	Confirmations        int64  `json:"confirmations"`
-}
 
 // RawEvent is the in-process matched chain event before outbox persistence.
 type RawEvent struct {
@@ -53,10 +40,8 @@ type RawEvent struct {
 	Confirmations        int64
 }
 
-func rawToWebhookPayload(id string, ev RawEvent) WebhookPayload {
-	return WebhookPayload{
-		ID:                   id,
-		Type:                 ev.Type,
+func rawToWebhookEnvelope(ev RawEvent) webhookpayload.Envelope {
+	return webhookpayload.NewTransactionEnvelope(ev.Type, ev.BlockTimestamp, webhookpayload.TransactionData{
 		TxHash:               ev.TxHash,
 		FromAddress:          ev.FromAddress,
 		ToAddress:            ev.ToAddress,
@@ -65,7 +50,7 @@ func rawToWebhookPayload(id string, ev RawEvent) WebhookPayload {
 		BlockNumber:          ev.BlockNumber,
 		BlockTimestamp:       ev.BlockTimestamp,
 		Confirmations:        ev.Confirmations,
-	}
+	})
 }
 
 // tronGridBlock is a partial deserialisation of TronGrid's block response.
@@ -874,7 +859,7 @@ func (p *Poller) saveHighestBlock(ctx context.Context, scope string, blockNum in
 func (p *Poller) enqueueOutboxEvents(ctx context.Context, scope string, events []RawEvent) (int, error) {
 	enqueued := 0
 	for _, ev := range events {
-		id, err := p.outbox.EnqueueWebhookEvent(ctx, ev.Type, scope, ev.TxHash, ev.BlockNumber, ev.BlockTimestamp, rawToWebhookPayload("", ev))
+		id, err := p.outbox.EnqueueWebhookEvent(ctx, ev.Type, scope, ev.TxHash, ev.BlockNumber, ev.BlockTimestamp, rawToWebhookEnvelope(ev))
 		if err != nil {
 			return enqueued, err
 		}
