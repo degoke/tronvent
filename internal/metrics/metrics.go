@@ -41,6 +41,18 @@ var (
 		Name: "tron_scanner_watchlist_size",
 		Help: "Current number of Tron addresses in the in-memory watch hashset",
 	})
+
+	// ScannerPollLoopReady is 1 while the block poller loop is running (after migration checks).
+	ScannerPollLoopReady = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "tron_scanner_poll_loop_ready",
+		Help: "1 when the forward block poller loop is active, 0 otherwise",
+	})
+
+	// ScopeLeaseSkipped counts forward-scan or startup reconcile skips when the scope lease was unavailable.
+	ScopeLeaseSkipped = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "tron_scanner_scope_lease_skipped_total",
+		Help: "Scope lease could not be acquired, partitioned by reason",
+	}, []string{"reason"})
 )
 
 // Register registers all metrics with the default Prometheus registry.
@@ -53,5 +65,7 @@ func Register() {
 		ScanErrors,
 		BlockScanDuration,
 		WatchlistSize,
+		ScannerPollLoopReady,
+		ScopeLeaseSkipped,
 	)
 }

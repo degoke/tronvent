@@ -151,7 +151,18 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return nil
 }
 
+type forwardScanReadiness interface {
+	ForwardScanReady() bool
+}
+
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if ready, ok := s.chainTip.(forwardScanReadiness); ok && !ready.ForwardScanReady() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"status": "unavailable",
+			"reason": "forward block poller is not running",
+		})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 

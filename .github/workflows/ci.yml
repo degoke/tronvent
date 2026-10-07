@@ -2,10 +2,6 @@ name: CI
 
 on:
   push:
-    branches:
-      - main
-      - master
-      - 'release/**'
   pull_request:
 
 permissions:
@@ -14,6 +10,23 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: tronvent_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d tronvent_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/tronvent_test?sslmode=disable
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/tronvent_test?sslmode=disable
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -41,6 +54,9 @@ jobs:
         with:
           version: v2.12
           args: ./...
+
+      - name: Migrate test database
+        run: go run ./cmd/migrate
 
       - name: Test
         run: make test

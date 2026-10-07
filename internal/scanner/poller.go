@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/degoke/tronvent/internal/config"
@@ -113,7 +114,11 @@ type tronGridTrc20EventsResp struct {
 // Defined as an interface so tests can inject a stub without a real database.
 type scannerDB interface {
 	GetScannedBlock(ctx context.Context, scope string) (int64, error)
-	SetScannedBlock(ctx context.Context, scope string, blockNum int64) error
+	SetScannedBlock(ctx context.Context, scope string, blockNum int64, leaseHolder string) error
+	RequireScannerCursorLeases(ctx context.Context) error
+	TryClaimScannerScope(ctx context.Context, scope, workerID string, lease time.Duration) (int64, bool, error)
+	RenewScannerScopeLease(ctx context.Context, scope, workerID string, lease time.Duration) error
+	ReleaseScannerScope(ctx context.Context, scope, workerID string) (bool, error)
 	ClaimBlockRangeJobs(ctx context.Context, queue string, workerID string, limit int) ([]internaldb.BlockRangeJob, error)
 	ClaimBlockRangeJob(ctx context.Context, queue string, workerID string) (*internaldb.BlockRangeJob, error)
 	CompleteJob(ctx context.Context, id string) error
@@ -142,8 +147,10 @@ type Poller struct {
 	addresses  AddressSet
 	contracts  contractLister
 	httpClient *http.Client
-	sem        chan struct{}
-	keys       *tronGridAPIKeyPool
+	sem           chan struct{}
+	keys          *tronGridAPIKeyPool
+	scanWorkerID      string
+	forwardScanReady  atomic.Bool
 }
 
 // NewPoller creates a Poller wired to Postgres cursors and the webhook outbox.
@@ -167,14 +174,33 @@ func NewPoller(
 		addresses:  addresses,
 		contracts:  contracts,
 		httpClient: &http.Client{Timeout: time.Duration(cfg.HTTPTimeoutSeconds) * time.Second},
-		sem:        make(chan struct{}, concurrency),
-		keys:       keys,
+		sem:          make(chan struct{}, concurrency),
+		keys:         keys,
+		scanWorkerID: NewScannerWorkerID(),
 	}
+}
+
+// ForwardScanReady reports whether the forward block poller loop is active.
+func (p *Poller) ForwardScanReady() bool {
+	return p.forwardScanReady.Load()
 }
 
 // Run starts the polling loop. It returns only when ctx is cancelled.
 func (p *Poller) Run(ctx context.Context) {
 	slog.Info("poller started", "intervalMs", p.cfg.PollIntervalMs)
+
+	if err := p.ensureScopeLeases(ctx); err != nil {
+		slog.Error("poller cannot start: scanner cursor leases unavailable", "err", err)
+		metrics.ScannerPollLoopReady.Set(0)
+		return
+	}
+
+	p.forwardScanReady.Store(true)
+	metrics.ScannerPollLoopReady.Set(1)
+	defer func() {
+		p.forwardScanReady.Store(false)
+		metrics.ScannerPollLoopReady.Set(0)
+	}()
 
 	ticker := time.NewTicker(time.Duration(p.cfg.PollIntervalMs) * time.Millisecond)
 	defer ticker.Stop()
@@ -318,8 +344,14 @@ func (p *Poller) poll(ctx context.Context) error {
 }
 
 func (p *Poller) scanTrx(ctx context.Context, latestBlock int64) error {
+	return p.withScopeLease(ctx, "TRX", func(ctx context.Context, cursorAtClaim int64) error {
+		return p.scanTrxWithLease(ctx, latestBlock, cursorAtClaim)
+	})
+}
+
+func (p *Poller) scanTrxWithLease(ctx context.Context, latestBlock int64, cursorAtClaim int64) error {
 	scope := "TRX"
-	fromBlock, err := p.getHighestBlock(ctx, scope)
+	fromBlock, err := p.cursorAfterClaim(ctx, scope, cursorAtClaim)
 	if err != nil {
 		return err
 	}
@@ -347,6 +379,9 @@ func (p *Poller) scanTrx(ctx context.Context, latestBlock int64) error {
 	totalEvents := 0
 
 	for batchStart := fromBlock + 1; batchStart <= latestBlock; {
+		if err := p.renewScopeLease(ctx, scope); err != nil {
+			return err
+		}
 		batchEnd := batchStart + blockBatchSize - 1
 		if batchEnd > latestBlock {
 			batchEnd = latestBlock
@@ -357,6 +392,9 @@ func (p *Poller) scanTrx(ctx context.Context, latestBlock int64) error {
 		if err != nil {
 			metrics.ScanErrors.WithLabelValues("trx").Inc()
 			return fmt.Errorf("getBlockRange(%d, %d): %w", batchStart, batchEnd+1, err)
+		}
+		if err := p.renewScopeLease(ctx, scope); err != nil {
+			return err
 		}
 
 		for range blocks {
@@ -433,6 +471,9 @@ func (p *Poller) scanTrx(ctx context.Context, latestBlock int64) error {
 			"published", batchEvents,
 			"elapsed", time.Since(commitStart).Round(time.Millisecond),
 		)
+		if err := p.renewScopeLease(ctx, scope); err != nil {
+			return err
+		}
 		batchStart = batchEnd + 1
 	}
 	slog.Info(
@@ -445,8 +486,14 @@ func (p *Poller) scanTrx(ctx context.Context, latestBlock int64) error {
 }
 
 func (p *Poller) scanTrc20(ctx context.Context, contract string, latestBlock int64) error {
+	return p.withScopeLease(ctx, contract, func(ctx context.Context, cursorAtClaim int64) error {
+		return p.scanTrc20WithLease(ctx, contract, latestBlock, cursorAtClaim)
+	})
+}
+
+func (p *Poller) scanTrc20WithLease(ctx context.Context, contract string, latestBlock int64, cursorAtClaim int64) error {
 	scope := contract
-	fromBlock, err := p.getHighestBlock(ctx, scope)
+	fromBlock, err := p.cursorAfterClaim(ctx, scope, cursorAtClaim)
 	if err != nil {
 		return err
 	}
@@ -474,6 +521,9 @@ func (p *Poller) scanTrc20(ctx context.Context, contract string, latestBlock int
 	totalEvents := 0
 
 	for batchStart := fromBlock + 1; batchStart <= latestBlock; {
+		if err := p.renewScopeLease(ctx, scope); err != nil {
+			return err
+		}
 		batchEnd := batchStart + blockBatchSize - 1
 		if batchEnd > latestBlock {
 			batchEnd = latestBlock
@@ -486,6 +536,9 @@ func (p *Poller) scanTrc20(ctx context.Context, contract string, latestBlock int
 		blocks, err := p.getBlockRange(ctx, batchStart, batchEnd+1)
 		if err != nil {
 			return fmt.Errorf("getBlockRange(%d, %d): %w", batchStart, batchEnd+1, err)
+		}
+		if err := p.renewScopeLease(ctx, scope); err != nil {
+			return err
 		}
 		slog.Debug(
 			"TRC20 block range fetched",
@@ -514,9 +567,12 @@ func (p *Poller) scanTrc20(ctx context.Context, contract string, latestBlock int
 			}
 		}
 		// Fetch all Transfer events in this timestamp range with fingerprint pagination.
-		allEvents, err := p.fetchTrc20EventsWithRetry(ctx, contract, minTs, maxTs, len(blocks))
+		allEvents, err := p.fetchTrc20EventsWithRetry(ctx, scope, contract, minTs, maxTs, len(blocks))
 		if err != nil {
 			return fmt.Errorf("fetchTrc20EventsWithRetry(%s): %w", contract, err)
+		}
+		if err := p.renewScopeLease(ctx, scope); err != nil {
+			return err
 		}
 
 		// Group matching events by block number for ordered commit.
@@ -614,6 +670,9 @@ func (p *Poller) scanTrc20(ctx context.Context, contract string, latestBlock int
 			"published", batchEvents,
 			"elapsed", time.Since(commitStart).Round(time.Millisecond),
 		)
+		if err := p.renewScopeLease(ctx, scope); err != nil {
+			return err
+		}
 		batchStart = batchEnd + 1
 	}
 	slog.Info(
@@ -761,7 +820,7 @@ func (p *Poller) replayTrc20Range(ctx context.Context, contract string, fromBloc
 				maxTs = ts
 			}
 		}
-		allEvents, err := p.getAllTrc20EventsByTimeRange(ctx, contract, minTs, maxTs)
+		allEvents, err := p.getAllTrc20EventsByTimeRange(ctx, "", contract, minTs, maxTs)
 		if err != nil {
 			return fmt.Errorf("getAllTrc20EventsByTimeRange(%s): %w", contract, err)
 		}
@@ -867,7 +926,7 @@ func (p *Poller) getHighestBlock(ctx context.Context, scope string) (int64, erro
 
 // saveHighestBlock persists the highest scanned block to Postgres.
 func (p *Poller) saveHighestBlock(ctx context.Context, scope string, blockNum int64) error {
-	return p.db.SetScannedBlock(ctx, scope, blockNum)
+	return p.db.SetScannedBlock(ctx, scope, blockNum, p.scannerWorkerID())
 }
 
 func (p *Poller) enqueueOutboxEvents(ctx context.Context, scope string, events []RawEvent) (int, error) {
@@ -928,7 +987,7 @@ func (p *Poller) trc20CursorAfterBatch(fromBlock, batchStart, batchEnd int64) in
 
 // fetchTrc20EventsWithRetry calls the TronGrid events API, retrying when blocks
 // were loaded but the API returned no events (typical indexing lag).
-func (p *Poller) fetchTrc20EventsWithRetry(ctx context.Context, contract string, minTs, maxTs int64, blockCount int) ([]tronGridTrc20Event, error) {
+func (p *Poller) fetchTrc20EventsWithRetry(ctx context.Context, scope, contract string, minTs, maxTs int64, blockCount int) ([]tronGridTrc20Event, error) {
 	retries := p.cfg.Trc20EventRetries
 	if retries <= 0 {
 		retries = 3
@@ -943,12 +1002,15 @@ func (p *Poller) fetchTrc20EventsWithRetry(ctx context.Context, contract string,
 		err error
 	)
 	for attempt := 1; attempt <= retries; attempt++ {
-		all, err = p.getAllTrc20EventsByTimeRange(ctx, contract, minTs, maxTs)
+		all, err = p.getAllTrc20EventsByTimeRange(ctx, scope, contract, minTs, maxTs)
 		if err != nil {
 			return nil, err
 		}
 		if len(all) > 0 || blockCount == 0 || attempt == retries {
 			break
+		}
+		if err := p.renewScopeLease(ctx, scope); err != nil {
+			return nil, err
 		}
 		slog.Debug(
 			"TRC20 events API empty for block batch, retrying",
@@ -969,10 +1031,15 @@ func (p *Poller) fetchTrc20EventsWithRetry(ctx context.Context, contract string,
 // getAllTrc20EventsByTimeRange fetches all Transfer events for a TRC-20 contract
 // within a millisecond timestamp range, following fingerprint-based pagination
 // until TronGrid reports no more results.
-func (p *Poller) getAllTrc20EventsByTimeRange(ctx context.Context, contract string, minTs, maxTs int64) ([]tronGridTrc20Event, error) {
+func (p *Poller) getAllTrc20EventsByTimeRange(ctx context.Context, scope, contract string, minTs, maxTs int64) ([]tronGridTrc20Event, error) {
 	var all []tronGridTrc20Event
 	fingerprint := ""
 	for page := 1; ; page++ {
+		if scope != "" {
+			if err := p.renewScopeLease(ctx, scope); err != nil {
+				return nil, err
+			}
+		}
 		url := fmt.Sprintf(
 			"%s/v1/contracts/%s/events?event_name=Transfer&min_timestamp=%d&max_timestamp=%d&limit=200&only_confirmed=true&order_by=block_timestamp,asc",
 			p.cfg.TronGridBaseURL, contract, minTs, maxTs,

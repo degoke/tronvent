@@ -65,6 +65,11 @@ func main() {
 	}
 	defer db.Close()
 
+	if err := db.RequireScannerCursorLeases(ctx); err != nil {
+		slog.Error("scanner requires migration 006 (cursor scope leases)", "err", err)
+		os.Exit(1)
+	}
+
 	if err := db.BootstrapWatchedContracts(ctx, cfg.Trc20Contracts); err != nil {
 		slog.Error("bootstrap contracts", "err", err)
 		os.Exit(1)
@@ -165,7 +170,6 @@ func main() {
 	}
 
 	poller := scanner.NewPoller(cfg, db, db, addressStore, contractStore)
-
 	apiSrv := api.New(cfg, db, addressStore, contractStore, webhookStore, poller)
 	apiSrv.Start()
 
@@ -178,7 +182,7 @@ func main() {
 		"requiredConfs", cfg.RequiredConfs,
 	)
 
-	runStartupReconcile(ctx, cfg, db, poller, contractStore)
+	go runStartupReconcile(ctx, cfg, db, poller, contractStore)
 
 	go poller.RunReconciler(ctx)
 	go poller.Run(ctx)
@@ -213,6 +217,9 @@ func runStartupReconcile(ctx context.Context, cfg *config.Config, db *internaldb
 	var gaps []scopeGap
 	totalBatches := 0
 
+	reconcileWorkerID := scanner.NewScannerWorkerID()
+	startupReconcileLease := internaldb.ScannerScopeLeaseDuration
+
 	scopes := append([]string{"TRX"}, contracts.List()...)
 	for _, scope := range scopes {
 		cursor, err := db.GetScannedBlock(ctx, scope)
@@ -237,10 +244,37 @@ func runStartupReconcile(ctx context.Context, cfg *config.Config, db *internaldb
 			continue
 		}
 
+		_, claimed, err := db.TryClaimScannerScope(ctx, scope, reconcileWorkerID, startupReconcileLease)
+		if err != nil {
+			slog.Error("[RECONCILE] startup: claim scope lease failed", "scope", scope, "err", err)
+			continue
+		}
+		if !claimed {
+			metrics.ScopeLeaseSkipped.WithLabelValues("startup_reconcile").Inc()
+			slog.Info("[RECONCILE] startup: scope lease held, skipping cursor jump", "scope", scope)
+			continue
+		}
+		releaseScope := func() {
+			relCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			released, err := db.ReleaseScannerScope(relCtx, scope, reconcileWorkerID)
+			if err != nil {
+				slog.Warn("[RECONCILE] startup: release scope lease failed", "scope", scope, "err", err)
+			} else if !released {
+				slog.Warn("[RECONCILE] startup: scope lease not held at release", "scope", scope)
+			}
+		}
+
 		gaps = append(gaps, scopeGap{scope, cursor, blocksBehind})
 
 		enqueued := 0
+		reconcileFailed := false
 		for start := cursor + 1; start <= safeBlock; start += batchSize {
+			if err := db.RenewScannerScopeLease(ctx, scope, reconcileWorkerID, startupReconcileLease); err != nil {
+				slog.Error("[RECONCILE] startup: renew scope lease failed", "scope", scope, "err", err)
+				reconcileFailed = true
+				break
+			}
 			end := start + batchSize - 1
 			if end > safeBlock {
 				end = safeBlock
@@ -252,7 +286,12 @@ func runStartupReconcile(ctx context.Context, cfg *config.Config, db *internaldb
 			}
 		}
 
-		if err := db.SetScannedBlock(ctx, scope, safeBlock); err != nil {
+		if reconcileFailed {
+			releaseScope()
+			continue
+		}
+
+		if err := db.SetScannedBlock(ctx, scope, safeBlock, reconcileWorkerID); err != nil {
 			slog.Error("[RECONCILE] startup: failed to advance cursor", "scope", scope, "err", err)
 		} else {
 			slog.Info(
@@ -261,6 +300,7 @@ func runStartupReconcile(ctx context.Context, cfg *config.Config, db *internaldb
 				"batches", enqueued, "blocks", blocksBehind,
 			)
 		}
+		releaseScope()
 		totalBatches += enqueued
 	}
 
