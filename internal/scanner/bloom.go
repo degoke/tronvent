@@ -18,9 +18,10 @@ const (
 //
 // Guarantees:
 //   - No false negatives: a real address is never missed.
-//   - Low false-positive rate (~0.1% at 1M addresses): an unknown address may
-//     pass the filter and reach the processor, where it is tagged as
-//     flag_reason='false_positive' in tron_transactions.
+//   - Low false-positive rate (~0.1% at 1M addresses): non-members may pass the
+//     filter; the poller confirms active watchlist membership in Postgres before
+//     enqueueing webhooks. Deactivated addresses may remain in the filter until
+//     the next full reload and are filtered out by the same confirmation step.
 type BloomFilter struct {
 	mu     sync.RWMutex
 	filter *bloom.BloomFilter

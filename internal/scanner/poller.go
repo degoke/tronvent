@@ -118,6 +118,12 @@ type scannerDB interface {
 	ClaimBlockRangeJob(ctx context.Context, queue string, workerID string) (*internaldb.BlockRangeJob, error)
 	CompleteJob(ctx context.Context, id string) error
 	FailJob(ctx context.Context, id string, cause error, retryAfter time.Duration) error
+	IsWatchedAddressActive(ctx context.Context, address string) (bool, error)
+	ActiveWatchedAddresses(ctx context.Context, addresses []string) (map[string]bool, error)
+}
+
+func (p *Poller) newAddressConfirm() *AddressConfirm {
+	return NewAddressConfirm(p.db)
 }
 
 type eventOutbox interface {
@@ -374,21 +380,16 @@ func (p *Poller) scanTrx(ctx context.Context, latestBlock int64) error {
 			block := blockMap[blockNum]
 			var events []RawEvent
 			if block != nil {
-				for _, tx := range block.Transactions {
-					if len(tx.RawData.Contract) == 0 {
-						continue
-					}
-					c := tx.RawData.Contract[0]
-					if c.Type != "TransferContract" {
-						continue
-					}
-					batchTxTotal++
-					toAddr := hexToBase58(c.Parameter.Value.ToAddress)
-					fromAddr := hexToBase58(c.Parameter.Value.OwnerAddress)
-					amount := sunToTrx(c.Parameter.Value.Amount)
+				legs := parseTrxTransferLegs(block)
+				confirm := p.newAddressConfirm()
+				confirm.Prefetch(ctx, bloomPrefetchFromTrxLegs(p.addresses, legs))
+				batchTxTotal += len(legs)
+				for _, leg := range legs {
 					matched := p.matchedTransferEvents(
-						"TRX", tx.TxID, fromAddr, toAddr, amount, "",
-						blockNum, block.BlockHeader.RawData.Timestamp,
+						ctx,
+						confirm,
+						"TRX", leg.txID, leg.fromAddr, leg.toAddr, leg.amount, "",
+						blockNum, leg.blockTS,
 					)
 					if len(matched) == 0 {
 						continue
@@ -399,10 +400,10 @@ func (p *Poller) scanTrx(ctx context.Context, latestBlock int64) error {
 						slog.Info(
 							"[TRANSACTION] TRX",
 							"direction", ev.Direction,
-							"txHash", tx.TxID,
-							"from", fromAddr,
-							"to", toAddr,
-							"amount", amount,
+							"txHash", leg.txID,
+							"from", leg.fromAddr,
+							"to", leg.toAddr,
+							"amount", leg.amount,
 							"block", blockNum,
 						)
 					}
@@ -530,6 +531,17 @@ func (p *Poller) scanTrc20(ctx context.Context, contract string, latestBlock int
 		seenTransferKeys := make(map[string]struct{}) // dedupe per transfer leg in this batch
 		eventsTotal := 0                              // events from chain within this block window
 		matchedCount := 0                             // matched to a watched address
+		confirm := p.newAddressConfirm()
+		var prefetch []string
+		for _, e := range allEvents {
+			if e.BlockNumber < batchStart || e.BlockNumber > batchEnd {
+				continue
+			}
+			toAddr := hexToBase58(e.Result.To)
+			fromAddr := hexToBase58(e.Result.From)
+			prefetch = append(prefetch, bloomConfirmCandidates(p.addresses, fromAddr, toAddr)...)
+		}
+		confirm.Prefetch(ctx, prefetch)
 		for _, e := range allEvents {
 			// Guard: only include events within our batch window.
 			if e.BlockNumber < batchStart || e.BlockNumber > batchEnd {
@@ -541,6 +553,8 @@ func (p *Poller) scanTrc20(ctx context.Context, contract string, latestBlock int
 			toAddr := hexToBase58(e.Result.To)
 			fromAddr := hexToBase58(e.Result.From)
 			matched := p.matchedTransferEvents(
+				ctx,
+				confirm,
 				"TRC20", e.TransactionID, fromAddr, toAddr, e.Result.Value, contract,
 				e.BlockNumber, e.BlockTimestamp,
 			)
@@ -683,30 +697,25 @@ func (p *Poller) replayTrxRange(ctx context.Context, fromBlock, toBlock int64) e
 			if block == nil {
 				continue
 			}
+			legs := parseTrxTransferLegs(block)
+			confirm := p.newAddressConfirm()
+			confirm.Prefetch(ctx, bloomPrefetchFromTrxLegs(p.addresses, legs))
 			var events []RawEvent
-			for _, tx := range block.Transactions {
-				if len(tx.RawData.Contract) == 0 {
-					continue
-				}
-				c := tx.RawData.Contract[0]
-				if c.Type != "TransferContract" {
-					continue
-				}
-				toAddr := hexToBase58(c.Parameter.Value.ToAddress)
-				fromAddr := hexToBase58(c.Parameter.Value.OwnerAddress)
-				amount := sunToTrx(c.Parameter.Value.Amount)
+			for _, leg := range legs {
 				matched := p.matchedTransferEvents(
-					"TRX", tx.TxID, fromAddr, toAddr, amount, "",
-					blockNum, block.BlockHeader.RawData.Timestamp,
+					ctx,
+					confirm,
+					"TRX", leg.txID, leg.fromAddr, leg.toAddr, leg.amount, "",
+					blockNum, leg.blockTS,
 				)
 				for _, ev := range matched {
 					slog.Info(
 						"[REPLAY][TRANSACTION] TRX",
 						"direction", ev.Direction,
-						"txHash", tx.TxID,
-						"from", fromAddr,
-						"to", toAddr,
-						"amount", amount,
+						"txHash", leg.txID,
+						"from", leg.fromAddr,
+						"to", leg.toAddr,
+						"amount", leg.amount,
 						"block", blockNum,
 					)
 				}
@@ -765,14 +774,27 @@ func (p *Poller) replayTrc20Range(ctx context.Context, contract string, fromBloc
 		eventsByBlock := make(map[int64][]RawEvent)
 		seenTransferKeys := make(map[string]struct{})
 		matchedCount := 0
+		confirm := p.newAddressConfirm()
+		var prefetch []string
 		for _, e := range allEvents {
 			if e.BlockNumber < batchStart || e.BlockNumber > batchEnd {
 				continue
 			}
 			toAddr := hexToBase58(e.Result.To)
 			fromAddr := hexToBase58(e.Result.From)
-			toMatched := p.addresses.Contains(toAddr)
-			fromMatched := p.addresses.Contains(fromAddr)
+			prefetch = append(prefetch, bloomConfirmCandidates(p.addresses, fromAddr, toAddr)...)
+		}
+		confirm.Prefetch(ctx, prefetch)
+		for _, e := range allEvents {
+			if e.BlockNumber < batchStart || e.BlockNumber > batchEnd {
+				continue
+			}
+			toAddr := hexToBase58(e.Result.To)
+			fromAddr := hexToBase58(e.Result.From)
+			toBloom := p.addresses.Contains(toAddr)
+			fromBloom := p.addresses.Contains(fromAddr)
+			toActive := toBloom && confirm.IsActive(ctx, toAddr)
+			fromActive := fromBloom && confirm.IsActive(ctx, fromAddr)
 			slog.Debug(
 				"[REPLAY] TRC20 event candidate",
 				"rawTo", e.Result.To,
@@ -782,10 +804,14 @@ func (p *Poller) replayTrc20Range(ctx context.Context, contract string, fromBloc
 				"txHash", e.TransactionID,
 				"contract", contract,
 				"block", e.BlockNumber,
-				"toInWatchlist", toMatched,
-				"fromInWatchlist", fromMatched,
+				"toBloomMatch", toBloom,
+				"fromBloomMatch", fromBloom,
+				"toActiveWatch", toActive,
+				"fromActiveWatch", fromActive,
 			)
 			matched := p.matchedTransferEvents(
+				ctx,
+				confirm,
 				"TRC20", e.TransactionID, fromAddr, toAddr, e.Result.Value, contract,
 				e.BlockNumber, e.BlockTimestamp,
 			)

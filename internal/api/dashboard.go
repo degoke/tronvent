@@ -380,7 +380,6 @@ func (s *Server) handleDashboardDeactivateAddress(w http.ResponseWriter, r *http
 		s.handleDashboardWatchlistAddresses(w, r)
 		return
 	}
-	_ = s.addresses.Reload(r.Context())
 	s.handleDashboardWatchlistAddresses(w, r)
 }
 
