@@ -26,9 +26,11 @@ type memDB struct {
 	retries          []internaldb.RetryJobRecord
 	webhookEvents    []internaldb.DashboardWebhookEvent
 	webhookAttempts  map[string][]internaldb.DashboardDeliveryAttempt
+	listActiveCalls  int
 }
 
 func (m *memDB) ListActiveAddresses(_ context.Context) ([]string, error) {
+	m.listActiveCalls++
 	var out []string
 	for _, a := range m.addresses {
 		if a.Status == "active" {
@@ -616,5 +618,31 @@ func TestDeleteAddressDeactivates(t *testing.T) {
 	}
 	if mem.addresses[0].Status != "inactive" {
 		t.Fatal("expected inactive status in db")
+	}
+}
+
+func TestDeleteAddressDoesNotReloadAddressStore(t *testing.T) {
+	addr := "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+	mem := &memDB{addresses: []internaldb.WatchedAddress{{
+		ID: "id-1", Address: addr, Status: "active", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}}}
+	addrStore := store.NewAddressStore(mem)
+	if err := addrStore.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if mem.listActiveCalls != 1 {
+		t.Fatalf("expected one initial reload, got %d", mem.listActiveCalls)
+	}
+	cfg := &config.Config{HealthPort: "0", AdminAPIToken: "secret", TronGridBaseURL: "https://api.trongrid.io"}
+	srv := api.New(cfg, mem, addrStore, store.NewContractStore(mem), store.NewWebhookConfigStore(mem), stubChainTip{})
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/addresses/"+addr, nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if mem.listActiveCalls != 1 {
+		t.Fatalf("delete should not reload address store, listActiveCalls=%d", mem.listActiveCalls)
 	}
 }

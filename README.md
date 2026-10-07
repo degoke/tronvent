@@ -87,11 +87,13 @@ Tronvent tunes the filter for **1 million addresses at a 0.1% false-positive rat
 
 | Property | Behavior |
 |---|---|
-| **No false negatives** | A real watched address is *never* missed. |
-| **Rare false positives** | ~1 in 1,000 non-watched addresses may pass the filter. These are harmless: the event is still deduplicated and delivered; you simply receive a webhook you can ignore. |
+| **No false negatives** | A real watched address is *never* missed while it remains in the Bloom filter. |
+| **Rare false positives** | ~1 in 1,000 non-watched addresses may pass the filter. Before a webhook is enqueued, the poller confirms the address is **actively** watched in Postgres (batch lookup per scan batch). False positives and deactivated rows do not produce webhooks. |
 | **Memory efficient** | Millions of addresses fit in a few megabytes instead of a multi-gigabyte hash map. |
 
-The filter reloads from Postgres on startup, on `LISTEN/NOTIFY` when addresses change via the admin API, and after the notification listener reconnects. An optional periodic safety-net reload can be enabled with `STATE_RESYNC_INTERVAL_SECONDS`; `0` disables it.
+The filter reloads from Postgres on startup, when addresses are **added or reactivated** (`LISTEN/NOTIFY` on `scanner_addresses_changed`), and after the notification listener reconnects. **Removing** an address only updates Postgres (`status = inactive`); the Bloom filter is not rebuilt (avoids full reloads on large watchlists). Deactivated addresses may remain in the filter until the next full reload, but Postgres confirmation prevents webhooks. An optional periodic safety-net reload can be enabled with `STATE_RESYNC_INTERVAL_SECONDS`; `0` disables it.
+
+If Postgres confirmation fails after retries, or the scan context is cancelled during confirm (e.g. shutdown), the poller **fails open** (enqueues the event) so transient DB errors and graceful stop do not drop in-flight matches.
 
 ### Reliability
 
@@ -419,7 +421,7 @@ All `/api/v1/*` routes require `Authorization: Bearer <ADMIN_API_TOKEN>`.
 | `POST` | `/api/v1/retries/range` | Replay a block range |
 | `GET` | `/api/v1/retries` | List retry jobs |
 
-Address and contract changes propagate to the in-memory Bloom filter immediately via Postgres `NOTIFY` — no restart required.
+New and reactivated addresses propagate to the in-memory Bloom filter via Postgres `NOTIFY` (and incremental `Add` on the writer). Deactivating an address does not rebuild the filter; the scanner relies on Postgres confirmation before delivery. Contract watchlist changes still reload the in-memory contract list via `NOTIFY`. No restart required.
 
 ---
 

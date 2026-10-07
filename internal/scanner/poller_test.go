@@ -21,6 +21,7 @@ type stubDB struct {
 	retryJobs     []internaldb.BlockRangeJob
 	completed     []string
 	failed        []string
+	activeAddrs   map[string]bool // nil → all addresses active
 }
 
 func newStubDB(initialBlock int64) *stubDB {
@@ -68,8 +69,23 @@ func (s *stubDB) FailJob(_ context.Context, id string, _ error, _ time.Duration)
 	return nil
 }
 
-func (s *stubDB) IsWatchedAddressActive(_ context.Context, _ string) (bool, error) {
-	return true, nil
+func (s *stubDB) IsWatchedAddressActive(_ context.Context, address string) (bool, error) {
+	if s.activeAddrs == nil {
+		return true, nil
+	}
+	return s.activeAddrs[address], nil
+}
+
+func (s *stubDB) ActiveWatchedAddresses(_ context.Context, addresses []string) (map[string]bool, error) {
+	out := make(map[string]bool, len(addresses))
+	for _, a := range addresses {
+		if s.activeAddrs == nil {
+			out[a] = true
+		} else {
+			out[a] = s.activeAddrs[a]
+		}
+	}
+	return out, nil
 }
 
 type stubOutbox struct {
@@ -199,6 +215,47 @@ func TestPoller_DetectsMatchedAddressAndEnqueuesEvent(t *testing.T) {
 	}
 	if !strings.Contains(string(outbox.events[0]), "transaction.trc20.received") {
 		t.Errorf("expected received TRC20 event type, got %s", outbox.events[0])
+	}
+}
+
+func TestPoller_BloomMatchInactiveInPostgresSkipsOutbox(t *testing.T) {
+	srv := mockTronGridServer(t)
+	defer srv.Close()
+
+	outbox := &stubOutbox{}
+	stubDatabaseClient := newStubDB(99)
+	stubDatabaseClient.activeAddrs = map[string]bool{knownTRC20Address: false}
+	const usdtContract = "TXLAQ63Xg1NAzckPwKHvzw7CSEmLMEqcdj"
+	stubDatabaseClient.scannedBlocks[usdtContract] = 99
+
+	cfg := &config.Config{
+		TronGridBaseURL:   srv.URL,
+		TronGridAPIKey:    "test-api-key",
+		RequiredConfs:     0,
+		Trc20EventConfs:   0,
+		Trc20CursorRetain: 0,
+		Trc20EventRetries: 1,
+	}
+
+	p := &Poller{
+		cfg:        cfg,
+		db:         stubDatabaseClient,
+		outbox:     outbox,
+		addresses:  NewHashSet([]string{knownTRC20Address}),
+		contracts:  stubContracts{contracts: []string{usdtContract}},
+		httpClient: srv.Client(),
+		sem:        make(chan struct{}, 20),
+	}
+
+	if err := p.poll(context.Background()); err != nil {
+		t.Fatalf("poll() error: %v", err)
+	}
+
+	outbox.mu.Lock()
+	count := len(outbox.events)
+	outbox.mu.Unlock()
+	if count != 0 {
+		t.Fatalf("expected no outbox events when postgres says inactive, got %d", count)
 	}
 }
 

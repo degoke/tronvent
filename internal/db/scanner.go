@@ -97,6 +97,48 @@ func (c *Client) IsWatchedAddressActive(ctx context.Context, address string) (bo
 	return status == "active", nil
 }
 
+// ActiveWatchedAddresses returns whether each address is actively watched (missing or inactive → false).
+func (c *Client) ActiveWatchedAddresses(ctx context.Context, addresses []string) (map[string]bool, error) {
+	out := make(map[string]bool, len(addresses))
+	if len(addresses) == 0 {
+		return out, nil
+	}
+	unique := make([]string, 0, len(addresses))
+	seen := make(map[string]struct{}, len(addresses))
+	for _, a := range addresses {
+		if a == "" {
+			continue
+		}
+		out[a] = false
+		if _, ok := seen[a]; ok {
+			continue
+		}
+		seen[a] = struct{}{}
+		unique = append(unique, a)
+	}
+	if len(unique) == 0 {
+		return out, nil
+	}
+	rows, err := c.Pool.Query(ctx, `
+		SELECT address, status FROM scanner_watched_addresses WHERE address = ANY($1)
+	`, unique)
+	if err != nil {
+		return nil, fmt.Errorf("ActiveWatchedAddresses: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var addr, status string
+		if err := rows.Scan(&addr, &status); err != nil {
+			return nil, fmt.Errorf("ActiveWatchedAddresses scan: %w", err)
+		}
+		out[addr] = status == "active"
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("ActiveWatchedAddresses: %w", err)
+	}
+	return out, nil
+}
+
 // ListAddresses returns watched addresses with optional status filter, exact search, and cursor pagination.
 func (c *Client) ListAddresses(ctx context.Context, status string, limit int, afterAddress, search string) ([]WatchedAddress, error) {
 	if limit <= 0 {

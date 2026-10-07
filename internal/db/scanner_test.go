@@ -91,6 +91,45 @@ func TestScannerRepositoryIntegration(t *testing.T) {
 	}
 }
 
+func TestWatchedAddressActiveIntegration(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+
+	ctx := context.Background()
+	client, err := internaldb.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	watchAddr := "TXYZopYRdj2D9XRtbG411XZZ3kM5VkAeBf"
+	if _, _, err := client.AddWatchedAddress(ctx, watchAddr, "test-active-check"); err != nil {
+		t.Fatal(err)
+	}
+
+	active, err := client.IsWatchedAddressActive(ctx, watchAddr)
+	if err != nil || !active {
+		t.Fatalf("expected active watchlist row, active=%v err=%v", active, err)
+	}
+	batch, err := client.ActiveWatchedAddresses(ctx, []string{watchAddr, "TNotOnWatchlistXXXXXXXXXXXXXXXXXXXXXXX"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !batch[watchAddr] || batch["TNotOnWatchlistXXXXXXXXXXXXXXXXXXXXXXX"] {
+		t.Fatalf("unexpected batch active map: %+v", batch)
+	}
+
+	if _, err := client.DeactivateWatchedAddress(ctx, watchAddr); err != nil {
+		t.Fatal(err)
+	}
+	active, err = client.IsWatchedAddressActive(ctx, watchAddr)
+	if err != nil || active {
+		t.Fatalf("expected inactive after deactivate, active=%v err=%v", active, err)
+	}
+}
+
 func TestEnqueueWebhookEventRespectsPartialSubscriptions(t *testing.T) {
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
