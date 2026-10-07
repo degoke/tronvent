@@ -13,7 +13,12 @@ var schemaFS embed.FS
 
 // ListEventSchemaTypes returns known Standard Webhooks event type ids.
 func ListEventSchemaTypes() []string {
-	return []string{TypeTransactionTRX, TypeTransactionTRC20}
+	return []string{
+		TypeTransactionTRXReceived,
+		TypeTransactionTRXBroadcasted,
+		TypeTransactionTRC20Received,
+		TypeTransactionTRC20Broadcasted,
+	}
 }
 
 // EventSchemaJSON returns the JSON Schema document for an event type.
@@ -21,6 +26,9 @@ func EventSchemaJSON(eventType string) ([]byte, error) {
 	eventType = strings.TrimSpace(eventType)
 	if eventType == "" {
 		return nil, fmt.Errorf("event type is required")
+	}
+	if !IsKnownEventType(eventType) {
+		return nil, fmt.Errorf("unknown event type %q", eventType)
 	}
 	path := "schemas/" + eventType + ".schema.json"
 	raw, err := schemaFS.ReadFile(path)

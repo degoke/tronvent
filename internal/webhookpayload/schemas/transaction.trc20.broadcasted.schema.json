@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://tronvent.dev/schemas/transaction.trc20",
-  "title": "transaction.trc20",
-  "description": "Standard Webhooks envelope for a matched TRC-20 transfer.",
+  "$id": "https://tronvent.dev/schemas/transaction.trc20.broadcasted",
+  "title": "transaction.trc20.broadcasted",
+  "description": "TRC-20 transfer where a watched address is the sender.",
   "type": "object",
   "required": ["type", "timestamp", "data"],
   "properties": {
-    "type": { "const": "transaction.trc20" },
+    "type": { "const": "transaction.trc20.broadcasted" },
     "timestamp": { "type": "string", "format": "date-time" },
     "data": {
       "type": "object",

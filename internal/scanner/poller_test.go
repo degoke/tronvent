@@ -188,6 +188,9 @@ func TestPoller_DetectsMatchedAddressAndEnqueuesEvent(t *testing.T) {
 	if !strings.Contains(string(outbox.events[0]), knownTRC20Address) {
 		t.Errorf("expected event payload to contain watched address, got %s", outbox.events[0])
 	}
+	if !strings.Contains(string(outbox.events[0]), "transaction.trc20.received") {
+		t.Errorf("expected received TRC20 event type, got %s", outbox.events[0])
+	}
 }
 
 func TestPoller_IgnoresUnmatchedAddresses(t *testing.T) {
@@ -356,6 +359,172 @@ func TestPoller_RetryBlockRange(t *testing.T) {
 	}
 	if retryJobsLeft != 0 {
 		t.Errorf("expected retry queue empty, got %d jobs", retryJobsLeft)
+	}
+}
+
+const watchedTRXSender = "TSenderWatchedXXXXXXXXXXXXXXXXXXXXXXX"
+const watchedTRXReceiver = "TReceiverWatchedXXXXXXXXXXXXXXXXXXXXX"
+const watchedTRXSelf = "TSelfWatchedXXXXXXXXXXXXXXXXXXXXXXXXX"
+
+func TestPoller_TRC20MultipleTransfersSameTx(t *testing.T) {
+	const contract = "TXLAQ63Xg1NAzckPwKHvzw7CSEmLMEqcdj"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "getnowblock"):
+			_, _ = fmt.Fprint(w, `{"blockID":"block-100","block_header":{"raw_data":{"number":100,"timestamp":1700000000000}},"transactions":[]}`)
+		case strings.Contains(r.URL.Path, "getblockbylimitnext"):
+			_, _ = fmt.Fprint(w, `{"block":[{"blockID":"block-100","block_header":{"raw_data":{"number":100,"timestamp":1700000000000}},"transactions":[]}]}`)
+		case strings.Contains(r.URL.Path, "/v1/contracts/"):
+			resp := map[string]any{
+				"data": []map[string]any{
+					{
+						"transaction_id": "0xmultileg", "block_number": 100, "block_timestamp": 1700000000000,
+						"result": map[string]any{"from": "TSenderAXXXXXXXXXXXXXXXXXXXXXXXXXXXX", "to": knownTRC20Address, "value": "100"},
+					},
+					{
+						"transaction_id": "0xmultileg", "block_number": 100, "block_timestamp": 1700000000000,
+						"result": map[string]any{"from": "TSenderBXXXXXXXXXXXXXXXXXXXXXXXXXXX", "to": knownTRC20Address, "value": "200"},
+					},
+				},
+				"meta": map[string]any{"page_size": 2, "at": int64(1700000000000), "fingerprint": ""}, "success": true,
+			}
+			_ = json.NewEncoder(w).Encode(resp)
+		}
+	}))
+	defer srv.Close()
+
+	outbox := &stubOutbox{}
+	dbStub := newStubDB(99)
+	dbStub.scannedBlocks[contract] = 99
+
+	p := &Poller{
+		cfg: &config.Config{TronGridBaseURL: srv.URL, TronGridAPIKey: "test", RequiredConfs: 0, Trc20EventConfs: 0, Trc20CursorRetain: 0, Trc20EventRetries: 1},
+		db: dbStub, outbox: outbox, addresses: NewHashSet([]string{knownTRC20Address}),
+		contracts: stubContracts{contracts: []string{contract}}, httpClient: srv.Client(), sem: make(chan struct{}, 5),
+	}
+	if err := p.poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	outbox.mu.Lock()
+	n := len(outbox.events)
+	outbox.mu.Unlock()
+	if n != 2 {
+		t.Fatalf("expected 2 received events for 2 transfer legs, got %d", n)
+	}
+}
+
+func TestPoller_TRC20Broadcasted(t *testing.T) {
+	const contract = "TXLAQ63Xg1NAzckPwKHvzw7CSEmLMEqcdj"
+	const watchedSender = "TSenderTRC20WatchedXXXXXXXXXXXXXXXXXXX"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "getnowblock"):
+			_, _ = fmt.Fprint(w, `{"blockID":"block-100","block_header":{"raw_data":{"number":100,"timestamp":1700000000000}},"transactions":[]}`)
+		case strings.Contains(r.URL.Path, "getblockbylimitnext"):
+			_, _ = fmt.Fprint(w, `{"block":[{"blockID":"block-100","block_header":{"raw_data":{"number":100,"timestamp":1700000000000}},"transactions":[]}]}`)
+		case strings.Contains(r.URL.Path, "/v1/contracts/"):
+			resp := map[string]any{
+				"data": []map[string]any{{
+					"transaction_id": "0xtrc20send", "block_number": 100, "block_timestamp": 1700000000000,
+					"result": map[string]any{"from": watchedSender, "to": "TReceiverNotWatchedXXXXXXXXXXXXXXX", "value": "99"},
+				}},
+				"meta": map[string]any{"page_size": 1, "at": int64(1700000000000), "fingerprint": ""}, "success": true,
+			}
+			_ = json.NewEncoder(w).Encode(resp)
+		}
+	}))
+	defer srv.Close()
+
+	outbox := &stubOutbox{}
+	dbStub := newStubDB(99)
+	dbStub.scannedBlocks[contract] = 99
+	p := &Poller{
+		cfg: &config.Config{TronGridBaseURL: srv.URL, TronGridAPIKey: "test", RequiredConfs: 0, Trc20EventConfs: 0, Trc20CursorRetain: 0, Trc20EventRetries: 1},
+		db: dbStub, outbox: outbox, addresses: NewHashSet([]string{watchedSender}),
+		contracts: stubContracts{contracts: []string{contract}}, httpClient: srv.Client(), sem: make(chan struct{}, 5),
+	}
+	if err := p.poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	outbox.mu.Lock()
+	body := string(outbox.events[0])
+	outbox.mu.Unlock()
+	if !strings.Contains(body, "transaction.trc20.broadcasted") {
+		t.Fatalf("expected broadcasted TRC20 event, got %s", body)
+	}
+}
+
+func TestPoller_TRXBroadcasted(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "getnowblock"):
+			_, _ = fmt.Fprint(w, `{"blockID":"block-100","block_header":{"raw_data":{"number":100,"timestamp":1700000000000}},"transactions":[]}`)
+		case strings.Contains(r.URL.Path, "getblockbylimitnext"):
+			block := fmt.Sprintf(`{"block":[{"blockID":"block-100","block_header":{"raw_data":{"number":100,"timestamp":1700000000000}},"transactions":[{"txID":"trx-broadcast","raw_data":{"contract":[{"type":"TransferContract","parameter":{"value":{"amount":2000000,"owner_address":"%s","to_address":"%s"}}}]}}]}]}`, watchedTRXSender, watchedTRXReceiver)
+			_, _ = w.Write([]byte(block))
+		}
+	}))
+	defer srv.Close()
+
+	outbox := &stubOutbox{}
+	dbStub := newStubDB(99)
+	p := &Poller{
+		cfg: &config.Config{TronGridBaseURL: srv.URL, TronGridAPIKey: "test", RequiredConfs: 0},
+		db: dbStub, outbox: outbox, addresses: NewHashSet([]string{watchedTRXSender}),
+		contracts: stubContracts{}, httpClient: srv.Client(), sem: make(chan struct{}, 5),
+	}
+	if err := p.poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	outbox.mu.Lock()
+	body := string(outbox.events[0])
+	outbox.mu.Unlock()
+	if !strings.Contains(body, "transaction.trx.broadcasted") {
+		t.Fatalf("expected broadcasted TRX event, got %s", body)
+	}
+}
+
+func TestPoller_TRXSelfTransferTwoEvents(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "getnowblock"):
+			_, _ = fmt.Fprint(w, `{"blockID":"block-100","block_header":{"raw_data":{"number":100,"timestamp":1700000000000}},"transactions":[]}`)
+		case strings.Contains(r.URL.Path, "getblockbylimitnext"):
+			block := fmt.Sprintf(`{"block":[{"blockID":"block-100","block_header":{"raw_data":{"number":100,"timestamp":1700000000000}},"transactions":[{"txID":"trx-self","raw_data":{"contract":[{"type":"TransferContract","parameter":{"value":{"amount":1000000,"owner_address":"%s","to_address":"%s"}}}]}}]}]}`, watchedTRXSelf, watchedTRXSelf)
+			_, _ = w.Write([]byte(block))
+		}
+	}))
+	defer srv.Close()
+
+	outbox := &stubOutbox{}
+	dbStub := newStubDB(99)
+	p := &Poller{
+		cfg: &config.Config{TronGridBaseURL: srv.URL, TronGridAPIKey: "test", RequiredConfs: 0},
+		db: dbStub, outbox: outbox, addresses: NewHashSet([]string{watchedTRXSelf}),
+		contracts: stubContracts{}, httpClient: srv.Client(), sem: make(chan struct{}, 5),
+	}
+	if err := p.poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	outbox.mu.Lock()
+	n := len(outbox.events)
+	joined := strings.Join(func() []string {
+		var ss []string
+		for _, e := range outbox.events {
+			ss = append(ss, string(e))
+		}
+		return ss
+	}(), "\n")
+	outbox.mu.Unlock()
+	if n != 2 {
+		t.Fatalf("expected received+broadcasted for self-transfer, got %d: %s", n, joined)
+	}
+	if !strings.Contains(joined, "transaction.trx.received") || !strings.Contains(joined, "transaction.trx.broadcasted") {
+		t.Fatalf("missing direction types: %s", joined)
 	}
 }
 

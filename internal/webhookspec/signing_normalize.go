@@ -6,6 +6,23 @@ import (
 	"strings"
 )
 
+// PrepareSigningKeyForDelivery normalizes keys for reads and delivery. Migrated whsec_/whsk_
+// values that are shorter than the Standard Webhooks minimum are kept as stored so rotation still works.
+func PrepareSigningKeyForDelivery(key string) (string, error) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return "", nil
+	}
+	normalized, err := NormalizeSigningKey(key)
+	if err == nil {
+		return normalized, nil
+	}
+	if strings.HasPrefix(key, secretPrefix) || strings.HasPrefix(key, privateKeyPrefix) {
+		return key, nil
+	}
+	return "", err
+}
+
 // NormalizeSigningKey converts legacy plaintext HMAC secrets to whsec_ form (same key bytes as pre-Standard Webhooks).
 func NormalizeSigningKey(key string) (string, error) {
 	key = strings.TrimSpace(key)

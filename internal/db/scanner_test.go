@@ -2,11 +2,14 @@ package db_test
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"testing"
 	"time"
 
 	internaldb "github.com/degoke/tronvent/internal/db"
+	"github.com/degoke/tronvent/internal/webhookpayload"
 	"github.com/degoke/tronvent/internal/webhookspec"
 )
 
@@ -67,20 +70,199 @@ func TestScannerRepositoryIntegration(t *testing.T) {
 		t.Fatalf("webhook upsert: %+v err=%v", ep, err)
 	}
 
-	envelope := map[string]any{
-		"type":      "transaction.trx",
-		"timestamp": "2024-06-01T12:00:00Z",
-		"data":      map[string]any{"txHash": "hash-1"},
+	data := map[string]any{
+		"txHash": "hash-1", "fromAddress": "TSenderXXX", "toAddress": "TReceiverXXX", "amount": "1.000000",
 	}
-	evID, err := client.EnqueueWebhookEvent(ctx, "TRX", "TRX", "hash-1", 100, time.Now().UnixMilli(), envelope)
+	envelope := map[string]any{
+		"type":      "transaction.trx.received",
+		"timestamp": "2024-06-01T12:00:00Z",
+		"data":      data,
+	}
+	evID, err := client.EnqueueWebhookEvent(ctx, webhookpayload.TypeTransactionTRXReceived, "TRX", "hash-1", 100, time.Now().UnixMilli(), envelope)
 	if err != nil || evID == "" {
 		t.Fatalf("enqueue event: id=%q err=%v", evID, err)
 	}
-	dupID, err := client.EnqueueWebhookEvent(ctx, "TRX", "TRX", "hash-1", 100, time.Now().UnixMilli(), envelope)
+	dupID, err := client.EnqueueWebhookEvent(ctx, webhookpayload.TypeTransactionTRXReceived, "TRX", "hash-1", 100, time.Now().UnixMilli(), envelope)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if dupID != "" {
 		t.Fatal("expected duplicate enqueue to be ignored")
+	}
+}
+
+func TestEnqueueWebhookEventRespectsPartialSubscriptions(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+	ctx := context.Background()
+	client, err := internaldb.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	whsec, err := webhookspec.GenerateSigningSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.UpsertPrimaryWebhookEndpointPreserveSecret(ctx, "https://example.com/hook-partial", whsec, true, "test",
+		[]string{webhookpayload.TypeTransactionTRXReceived})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	received := map[string]any{
+		"type": "transaction.trx.received", "timestamp": "2024-06-01T12:00:00Z",
+		"data": map[string]any{"txHash": "hash-partial", "fromAddress": "TA", "toAddress": "TB", "amount": "1"},
+	}
+	broadcasted := map[string]any{
+		"type": "transaction.trx.broadcasted", "timestamp": "2024-06-01T12:00:00Z",
+		"data": map[string]any{"txHash": "hash-partial", "fromAddress": "TA", "toAddress": "TB", "amount": "1"},
+	}
+	if id, err := client.EnqueueWebhookEvent(ctx, webhookpayload.TypeTransactionTRXReceived, "TRX", "hash-partial", 100, time.Now().UnixMilli(), received); err != nil || id == "" {
+		t.Fatalf("received enqueue: id=%q err=%v", id, err)
+	}
+	if id, err := client.EnqueueWebhookEvent(ctx, webhookpayload.TypeTransactionTRXBroadcasted, "TRX", "hash-partial", 100, time.Now().UnixMilli(), broadcasted); err != nil || id != "" {
+		t.Fatalf("broadcasted should be filtered out: id=%q err=%v", id, err)
+	}
+}
+
+func TestEnqueueWebhookEventDistinctTransfersSameTx(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+	ctx := context.Background()
+	client, err := internaldb.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	whsec, err := webhookspec.GenerateSigningSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.UpsertPrimaryWebhookEndpointPreserveSecret(ctx, "https://example.com/hook-multi", whsec, true, "test", webhookpayload.DefaultEventTypes())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	txHash := "hash-multi-leg"
+	for i, from := range []string{"TSenderA", "TSenderB"} {
+		env := map[string]any{
+			"type": webhookpayload.TypeTransactionTRC20Received, "timestamp": "2024-06-01T12:00:00Z",
+			"data": map[string]any{
+				"txHash": txHash, "fromAddress": from, "toAddress": "TReceiver", "amount": fmt.Sprintf("%d", i+1),
+			},
+		}
+		if id, err := client.EnqueueWebhookEvent(ctx, webhookpayload.TypeTransactionTRC20Received, "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t", txHash, 100, time.Now().UnixMilli(), env); err != nil || id == "" {
+			t.Fatalf("leg %d enqueue: id=%q err=%v", i, id, err)
+		}
+	}
+}
+
+func TestEnqueueWebhookEventRespectsLegacyDedupeKey(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+	ctx := context.Background()
+	client, err := internaldb.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	whsec, err := webhookspec.GenerateSigningSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ep, err := client.UpsertPrimaryWebhookEndpointPreserveSecret(ctx, "https://example.com/hook-legacy-dedupe", whsec, true, "test", webhookpayload.DefaultEventTypes())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	scope := "TRX"
+	txHash := "legacy-dedupe-tx"
+	from, to, amount := "TSenderXXX", "TReceiverXXX", "1.000000"
+	legacyKey := scope + ":" + txHash + ":" + ep.ID
+	payload := map[string]any{
+		"type": webhookpayload.TypeTransactionTRXReceived, "timestamp": "2024-06-01T12:00:00Z",
+		"data": map[string]any{"txHash": txHash, "fromAddress": from, "toAddress": to, "amount": amount},
+	}
+	raw, _ := json.Marshal(payload)
+	_, err = client.Pool.Exec(ctx, `
+		INSERT INTO webhook_events (id, event_type, scope, tx_hash, block_number, block_timestamp, payload, dedupe_key, endpoint_id, status)
+		VALUES (gen_random_uuid(), $1, $2, $3, 1, 1, $4, $5, $6, 'delivered')
+	`, webhookpayload.TypeTransactionTRXReceived, scope, txHash, raw, legacyKey, ep.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dupID, err := client.EnqueueWebhookEvent(ctx, webhookpayload.TypeTransactionTRXReceived, scope, txHash, 100, time.Now().UnixMilli(), payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dupID != "" {
+		t.Fatal("expected legacy dedupe row to block re-enqueue")
+	}
+}
+
+func TestEnqueueWebhookEventRejectsPayloadTypeMismatch(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+	ctx := context.Background()
+	client, err := internaldb.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	whsec, err := webhookspec.GenerateSigningSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.UpsertPrimaryWebhookEndpointPreserveSecret(ctx, "https://example.com/hook-mismatch", whsec, true, "test", webhookpayload.DefaultEventTypes())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	env := map[string]any{
+		"type": "transaction.trx.broadcasted", "timestamp": "2024-06-01T12:00:00Z",
+		"data": map[string]any{"txHash": "x", "fromAddress": "A", "toAddress": "B", "amount": "1"},
+	}
+	_, err = client.EnqueueWebhookEvent(ctx, webhookpayload.TypeTransactionTRXReceived, "TRX", "x", 1, time.Now().UnixMilli(), env)
+	if err == nil {
+		t.Fatal("expected type mismatch error")
+	}
+}
+
+func TestUpsertWebhookEndpointRejectsLegacyEventTypes(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+	ctx := context.Background()
+	client, err := internaldb.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	whsec, err := webhookspec.GenerateSigningSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.UpsertWebhookEndpoint(ctx, internaldb.WebhookEndpoint{
+		WebhookURL: "https://example.com/legacy-types", SigningSecret: whsec,
+		EventTypes: []string{"transaction.trx"}, IsActive: true, Source: "test",
+	})
+	if err == nil {
+		t.Fatal("expected legacy event type rejection")
 	}
 }

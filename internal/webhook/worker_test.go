@@ -86,7 +86,7 @@ func TestWorkerDeliversSignedWebhook(t *testing.T) {
 	})
 
 	payload, _ := json.Marshal(webhookpayload.Envelope{
-		Type:      webhookpayload.TypeTransactionTRX,
+		Type:      webhookpayload.TypeTransactionTRXReceived,
 		Timestamp: webhookpayload.EventOccurredAt(1710000000000),
 		Data:      webhookpayload.TransactionData{ID: "evt-1", TxHash: "abc"},
 	})
@@ -117,7 +117,7 @@ func TestWorkerRetriesOn5xx(t *testing.T) {
 	cfgStore := store.NewWebhookConfigStore(nil)
 	cfgStore.UpsertEndpoint(internaldb.WebhookEndpoint{ID: "ep-1", WebhookURL: srv.URL, SigningSecret: secret, IsActive: true})
 
-	payload, _ := json.Marshal(webhookpayload.NewTransactionEnvelope("TRX", 1710000000000, webhookpayload.TransactionData{ID: "evt-2", TxHash: "x"}))
+	payload, _ := json.Marshal(webhookpayload.NewDirectedTransactionEnvelope("TRX", webhookpayload.DirectionReceived, 1710000000000, webhookpayload.TransactionData{ID: "evt-2", TxHash: "x"}))
 	failed := false
 	db := &retryDB{
 		event:  internaldb.WebhookEvent{ID: "evt-2", EventType: "TRX", Scope: "TRX", TxHash: "x", Payload: payload, CreatedAt: time.Now()},
@@ -191,7 +191,7 @@ func TestWorkerManualRetryAfterMaximumUsesNextAttemptOnce(t *testing.T) {
 	secret := testSigningSecret(t)
 	cfgStore := store.NewWebhookConfigStore(nil)
 	cfgStore.UpsertEndpoint(internaldb.WebhookEndpoint{ID: "ep-1", WebhookURL: srv.URL, SigningSecret: secret, IsActive: true})
-	payload, _ := json.Marshal(webhookpayload.NewTransactionEnvelope("TRX", 1710000000000, webhookpayload.TransactionData{ID: "evt-dead", TxHash: "dead"}))
+	payload, _ := json.Marshal(webhookpayload.NewDirectedTransactionEnvelope("TRX", webhookpayload.DirectionReceived, 1710000000000, webhookpayload.TransactionData{ID: "evt-dead", TxHash: "dead"}))
 	db := &retryDB{
 		event: internaldb.WebhookEvent{
 			ID: "evt-dead", EventType: "TRX", Scope: "TRX", TxHash: "dead", Payload: payload,

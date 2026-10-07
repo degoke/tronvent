@@ -15,6 +15,7 @@ import (
 	"github.com/degoke/tronvent/internal/config"
 	internaldb "github.com/degoke/tronvent/internal/db"
 	"github.com/degoke/tronvent/internal/store"
+	"github.com/degoke/tronvent/internal/webhookpayload"
 )
 
 type memDB struct {
@@ -364,6 +365,57 @@ func TestPutWebhookUpdatesConfig(t *testing.T) {
 	}
 	if len(mem.webhookEndpoints) == 0 || mem.webhookEndpoints[0].WebhookURL != "https://example.com/hook" {
 		t.Fatal("webhook config not saved")
+	}
+}
+
+func TestPostWebhookEndpointRejectsLegacyEventTypes(t *testing.T) {
+	mem := &memDB{}
+	srv := newTestServer(t, mem)
+	body, _ := json.Marshal(map[string]any{
+		"webhookUrl": "https://example.com/hooks/legacy",
+		"eventTypes": []string{"transaction.trx"},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhook/endpoints", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPatchWebhookEndpointRejectsLegacyEventTypes(t *testing.T) {
+	mem := &memDB{webhookEndpoints: []internaldb.WebhookEndpoint{{
+		ID: "ep-1", WebhookURL: "https://example.com/hooks/1", IsActive: true,
+		EventTypes: webhookpayload.DefaultEventTypes(),
+	}}}
+	srv := newTestServer(t, mem)
+	body, _ := json.Marshal(map[string]any{"eventTypes": []string{"transaction.trc20"}})
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/webhook/endpoints/ep-1", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPostWebhookEndpointAcceptsPartialEventTypes(t *testing.T) {
+	mem := &memDB{}
+	srv := newTestServer(t, mem)
+	body, _ := json.Marshal(map[string]any{
+		"webhookUrl": "https://example.com/hooks/partial",
+		"eventTypes": []string{webhookpayload.TypeTransactionTRXReceived},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhook/endpoints", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(mem.webhookEndpoints) != 1 || len(mem.webhookEndpoints[0].EventTypes) != 1 {
+		t.Fatalf("unexpected endpoint: %+v", mem.webhookEndpoints)
 	}
 }
 

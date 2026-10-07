@@ -14,6 +14,7 @@ import (
 	"github.com/degoke/tronvent/internal/config"
 	internaldb "github.com/degoke/tronvent/internal/db"
 	"github.com/degoke/tronvent/internal/store"
+	"github.com/degoke/tronvent/internal/webhookpayload"
 	"github.com/degoke/tronvent/internal/validate"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -307,6 +308,10 @@ func (s *Server) handlePutWebhook(w http.ResponseWriter, r *http.Request) {
 	req.SigningSecret = strings.TrimSpace(req.SigningSecret)
 	if req.WebhookURL == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "webhookUrl is required"})
+		return
+	}
+	if err := webhookpayload.ValidateEventTypes(req.EventTypes); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 

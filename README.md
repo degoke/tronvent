@@ -263,7 +263,7 @@ See `charts/tronvent/values.yaml` for all configurable values including resource
 make migrate
 ```
 
-Requires `DATABASE_URL`. Applies all pending files under `migrations/` (tracked in `schema_migrations`). Migration `002` wraps legacy plaintext signing secrets as `whsec_` (same key bytes) and rewrites outbox `dedupe_key` values to include `endpoint_id`.
+Requires `DATABASE_URL`. Applies all pending files under `migrations/` (tracked in `schema_migrations`). Notable migrations: `002` (webhook endpoints fanout), `003` (direction-specific default `event_types`), `004` (rewrites stored `transaction.trx` / `transaction.trc20` subscriptions to the four supported types), `005` (rewrites outbox `dedupe_key` to include event type and transfer leg).
 
 #### 2. Configure environment
 
@@ -409,7 +409,7 @@ All `/api/v1/*` routes require `Authorization: Bearer <ADMIN_API_TOKEN>`.
 | `PATCH` | `/api/v1/webhook/endpoints/{id}` | Update URL, event types, active flag, notify email, or signing key |
 | `DELETE` | `/api/v1/webhook/endpoints/{id}` | Remove endpoint |
 | `GET` | `/api/v1/webhook/schemas` | JSON Schemas for all event types |
-| `GET` | `/api/v1/webhook/schemas/event?type=transaction.trx` | One event type schema |
+| `GET` | `/api/v1/webhook/schemas/event?type=transaction.trx.received` | One event type schema |
 | `GET` | `/api/v1/webhooks?status=failed&limit=50` | List webhook events (`status=dead` or `status=all` are also supported) |
 | `GET` | `/api/v1/webhooks/{eventID}/attempts` | List delivery attempts for one webhook event |
 | `POST` | `/api/v1/webhooks/{eventID}/retry` | Retry one failed or dead webhook event |
@@ -434,11 +434,11 @@ webhook-signature:      v1,<base64 hmac>
 Content-Type:           application/json
 ```
 
-**Body example** (`transaction.trc20`):
+**Body example** (`transaction.trc20.received`):
 
 ```json
 {
-  "type": "transaction.trc20",
+  "type": "transaction.trc20.received",
   "timestamp": "2024-06-24T15:04:05.123456789Z",
   "data": {
     "id": "550e8400-e29b-41d4-a716-446655440000",
@@ -454,7 +454,18 @@ Content-Type:           application/json
 }
 ```
 
-Event types are `transaction.trx` or `transaction.trc20`. The top-level `timestamp` is when the transfer occurred (block time, ISO 8601 UTC). For TRC-20, `data.amount` is the raw token value (check contract decimals). For TRX, it is a decimal string in TRX units.
+Supported event types (asset + direction relative to watched addresses):
+
+| Type | Meaning |
+|------|---------|
+| `transaction.trx.received` | Watched address received TRX |
+| `transaction.trx.broadcasted` | Watched address sent TRX |
+| `transaction.trc20.received` | Watched address received a TRC-20 transfer |
+| `transaction.trc20.broadcasted` | Watched address sent a TRC-20 transfer |
+
+**Received** means a watched address is the transfer recipient; **broadcasted** means a watched address is the sender. A self-transfer to the same watched address can emit both event types (two deliveries).
+
+The top-level `timestamp` is when the transfer occurred (block time, ISO 8601 UTC). For TRC-20, `data.amount` is the raw token value (check contract decimals). For TRX, it is a decimal string in TRX units.
 
 ### Verify signatures
 
@@ -484,11 +495,11 @@ Tronvent implements the Standard Webhooks producer guidelines:
   - dashboard **Webhooks** → enable **Active** on the primary endpoint, or
   - `PUT /api/v1/webhook` (updates the primary endpoint and sets it active).
   After re-enabling, use `POST /api/v1/webhooks/{eventID}/retry` or **retry-all** for `failed`/`dead` events you still want delivered.
-- **Event filtering** — per-endpoint `eventTypes` (default: `transaction.trx`, `transaction.trc20`). Unsubscribed events are not enqueued.
+- **Event filtering** — per-endpoint `eventTypes` (default: all four direction-specific types above). An empty stored list is treated the same as the default at delivery time. Unsubscribed events are not enqueued.
 - **Fanout** — multiple endpoints via `GET/POST/PATCH/DELETE /api/v1/webhook/endpoints/{id}` (one outbox row per endpoint).
 - **Failure notification** — optional `failureNotifyEmail` per endpoint; configure `WEBHOOK_NOTIFY_SMTP_*` to send email when an endpoint is auto-disabled (410 or chronic failure).
 - **Payload size** — rejected above **20 KB** at enqueue time.
-- **Schemas** — JSON Schema in `internal/webhookpayload/schemas/`; API `GET /api/v1/webhook/schemas` and `GET /api/v1/webhook/schemas/event?type=transaction.trx`; OpenAPI sketch in `docs/webhooks/openapi.yaml`.
+- **Schemas** — JSON Schema in `internal/webhookpayload/schemas/` (one file per event type); API `GET /api/v1/webhook/schemas` and `GET /api/v1/webhook/schemas/event?type=<eventType>`; OpenAPI sketch in `docs/webhooks/openapi.yaml`.
 
 **Static egress IPs:** configure your firewall from the outbound IPs of the host or NAT gateway running Tronvent (not assigned by the app).
 

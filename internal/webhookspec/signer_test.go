@@ -14,7 +14,7 @@ func TestBuildHeadersStandardWebhooks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body := []byte(`{"type":"transaction.trx","timestamp":"2024-01-01T00:00:00Z","data":{"id":"x","txHash":"abc"}}`)
+	body := []byte(`{"type":"transaction.trx.received","timestamp":"2024-01-01T00:00:00Z","data":{"id":"x","txHash":"abc"}}`)
 	const (
 		eventID = "550e8400-e29b-41d4-a716-446655440000"
 		ts      = int64(1710000000)

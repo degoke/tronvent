@@ -37,6 +37,21 @@ func TestNormalizeSigningKeyPreservesWhsec(t *testing.T) {
 	}
 }
 
+func TestPrepareSigningKeyForDeliveryKeepsShortMigratedWhsec(t *testing.T) {
+	short := "this-is-a-long-legacy-secret-key!!"
+	normalized, err := webhookspec.NormalizeSigningKey(short)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := webhookspec.PrepareSigningKeyForDelivery(normalized)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != normalized {
+		t.Fatalf("expected stored key unchanged, got %q", out)
+	}
+}
+
 func TestNormalizeSigningKeyRejectsShortLegacy(t *testing.T) {
 	_, err := webhookspec.NormalizeSigningKey("short")
 	if err == nil {

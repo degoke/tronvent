@@ -78,7 +78,7 @@ func TestWorker410DisablesEndpointWithoutEndpointIDOnEvent(t *testing.T) {
 	cfgStore.UpsertEndpoint(internaldb.WebhookEndpoint{
 		ID: "ep-primary", WebhookURL: srv.URL, SigningSecret: secret, IsActive: true,
 	})
-	payload, _ := json.Marshal(webhookpayload.NewTransactionEnvelope("TRX", 1710000000000, webhookpayload.TransactionData{ID: "evt-410", TxHash: "gone"}))
+	payload, _ := json.Marshal(webhookpayload.NewDirectedTransactionEnvelope("TRX", webhookpayload.DirectionReceived, 1710000000000, webhookpayload.TransactionData{ID: "evt-410", TxHash: "gone"}))
 	db := &lifecycleDB{event: internaldb.WebhookEvent{
 		ID: "evt-410", EventType: "TRX", Scope: "TRX", TxHash: "gone", Payload: payload, CreatedAt: time.Now(),
 		// endpoint_id empty — delivery uses primary; disable must still target ep-primary.
@@ -108,7 +108,7 @@ func TestWorker4xxMarksDeadWithoutDisablingEndpoint(t *testing.T) {
 	cfgStore.UpsertEndpoint(internaldb.WebhookEndpoint{
 		ID: "ep-1", WebhookURL: srv.URL, SigningSecret: secret, IsActive: true,
 	})
-	payload, _ := json.Marshal(webhookpayload.NewTransactionEnvelope("TRX", 1710000000000, webhookpayload.TransactionData{ID: "evt-404", TxHash: "nf"}))
+	payload, _ := json.Marshal(webhookpayload.NewDirectedTransactionEnvelope("TRX", webhookpayload.DirectionReceived, 1710000000000, webhookpayload.TransactionData{ID: "evt-404", TxHash: "nf"}))
 	db := &lifecycleDB{event: internaldb.WebhookEvent{
 		ID: "evt-404", EndpointID: "ep-1", EventType: "TRX", Scope: "TRX", TxHash: "nf", Payload: payload, CreatedAt: time.Now(),
 	}}
@@ -139,7 +139,7 @@ func TestWorkerLoadsEndpointFromDBWhenStoreCacheMiss(t *testing.T) {
 	ep := internaldb.WebhookEndpoint{
 		ID: "ep-db", WebhookURL: srv.URL, SigningSecret: secret, IsActive: true,
 	}
-	payload, _ := json.Marshal(webhookpayload.NewTransactionEnvelope("TRX", 1710000000000, webhookpayload.TransactionData{ID: "evt-db", TxHash: "db"}))
+	payload, _ := json.Marshal(webhookpayload.NewDirectedTransactionEnvelope("TRX", webhookpayload.DirectionReceived, 1710000000000, webhookpayload.TransactionData{ID: "evt-db", TxHash: "db"}))
 	db := &lifecycleDB{
 		event: internaldb.WebhookEvent{
 			ID: "evt-db", EndpointID: "ep-db", EventType: "TRX", Scope: "TRX", TxHash: "db", Payload: payload, CreatedAt: time.Now(),
@@ -171,7 +171,7 @@ func TestWorkerChronicFailureDisablesEndpoint(t *testing.T) {
 	cfgStore.UpsertEndpoint(internaldb.WebhookEndpoint{
 		ID: "ep-chronic", WebhookURL: srv.URL, SigningSecret: secret, IsActive: true,
 	})
-	payload, _ := json.Marshal(webhookpayload.NewTransactionEnvelope("TRX", 1710000000000, webhookpayload.TransactionData{ID: "evt-chronic", TxHash: "c"}))
+	payload, _ := json.Marshal(webhookpayload.NewDirectedTransactionEnvelope("TRX", webhookpayload.DirectionReceived, 1710000000000, webhookpayload.TransactionData{ID: "evt-chronic", TxHash: "c"}))
 	db := &lifecycleDB{event: internaldb.WebhookEvent{
 		ID: "evt-chronic", EndpointID: "ep-chronic", EventType: "TRX", Scope: "TRX", TxHash: "c",
 		Payload: payload, AttemptCount: 1, CreatedAt: time.Now(),
@@ -203,7 +203,7 @@ func TestWorkerInactiveEndpointMarksDeadWithoutHTTP(t *testing.T) {
 	cfgStore.UpsertEndpoint(internaldb.WebhookEndpoint{
 		ID: "ep-off", WebhookURL: srv.URL, SigningSecret: secret, IsActive: false,
 	})
-	payload, _ := json.Marshal(webhookpayload.NewTransactionEnvelope("TRX", 1710000000000, webhookpayload.TransactionData{ID: "evt-off", TxHash: "off"}))
+	payload, _ := json.Marshal(webhookpayload.NewDirectedTransactionEnvelope("TRX", webhookpayload.DirectionReceived, 1710000000000, webhookpayload.TransactionData{ID: "evt-off", TxHash: "off"}))
 	db := &lifecycleDB{event: internaldb.WebhookEvent{
 		ID: "evt-off", EndpointID: "ep-off", EventType: "TRX", Scope: "TRX", TxHash: "off", Payload: payload, CreatedAt: time.Now(),
 	}}

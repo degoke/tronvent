@@ -1,22 +1,22 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://tronvent.dev/schemas/transaction.trx",
-  "title": "transaction.trx",
-  "description": "Standard Webhooks envelope for a matched TRX transfer.",
+  "$id": "https://tronvent.dev/schemas/transaction.trc20.received",
+  "title": "transaction.trc20.received",
+  "description": "TRC-20 transfer where a watched address is the recipient.",
   "type": "object",
   "required": ["type", "timestamp", "data"],
   "properties": {
-    "type": { "const": "transaction.trx" },
+    "type": { "const": "transaction.trc20.received" },
     "timestamp": { "type": "string", "format": "date-time" },
     "data": {
       "type": "object",
-      "required": ["id", "txHash", "fromAddress", "toAddress", "amount", "blockNumber", "blockTimestamp", "confirmations"],
+      "required": ["id", "txHash", "fromAddress", "toAddress", "amount", "tokenContractAddress", "blockNumber", "blockTimestamp", "confirmations"],
       "properties": {
         "id": { "type": "string", "format": "uuid" },
         "txHash": { "type": "string" },
         "fromAddress": { "type": "string" },
         "toAddress": { "type": "string" },
-        "amount": { "type": "string", "description": "TRX amount as a decimal string" },
+        "amount": { "type": "string", "description": "Raw token amount (check contract decimals)" },
         "tokenContractAddress": { "type": "string" },
         "blockNumber": { "type": "integer" },
         "blockTimestamp": { "type": "integer", "description": "Block time in milliseconds since epoch" },

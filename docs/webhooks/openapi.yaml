@@ -6,6 +6,10 @@ info:
     JSON payloads delivered to subscriber endpoints follow [Standard Webhooks](https://www.standardwebhooks.com)
     (`webhook-id`, `webhook-timestamp`, `webhook-signature` headers).
 
+    Event types are direction-specific relative to watched addresses:
+    `transaction.trx.received`, `transaction.trx.broadcasted`, `transaction.trc20.received`,
+    and `transaction.trc20.broadcasted`.
+
     Machine-readable JSON Schema files live in `internal/webhookpayload/schemas/` and are served from
     `GET /api/v1/webhook/schemas`.
 
@@ -32,8 +36,10 @@ paths:
           application/json:
             schema:
               oneOf:
-                - $ref: '#/components/schemas/TransactionTRX'
-                - $ref: '#/components/schemas/TransactionTRC20'
+                - $ref: '#/components/schemas/TransactionTRXReceived'
+                - $ref: '#/components/schemas/TransactionTRXBroadcasted'
+                - $ref: '#/components/schemas/TransactionTRC20Received'
+                - $ref: '#/components/schemas/TransactionTRC20Broadcasted'
       responses:
         '2xx':
           description: Delivery accepted
@@ -48,9 +54,15 @@ paths:
 
 components:
   schemas:
-    TransactionTRX:
+    TransactionTRXReceived:
       type: object
-      description: See GET /api/v1/webhook/schemas/event?type=transaction.trx
-    TransactionTRC20:
+      description: See GET /api/v1/webhook/schemas/event?type=transaction.trx.received
+    TransactionTRXBroadcasted:
       type: object
-      description: See GET /api/v1/webhook/schemas/event?type=transaction.trc20
+      description: See GET /api/v1/webhook/schemas/event?type=transaction.trx.broadcasted
+    TransactionTRC20Received:
+      type: object
+      description: See GET /api/v1/webhook/schemas/event?type=transaction.trc20.received
+    TransactionTRC20Broadcasted:
+      type: object
+      description: See GET /api/v1/webhook/schemas/event?type=transaction.trc20.broadcasted

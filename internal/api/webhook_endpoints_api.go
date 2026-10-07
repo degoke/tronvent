@@ -80,7 +80,11 @@ func (s *Server) handlePatchWebhookEndpoint(w http.ResponseWriter, r *http.Reque
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		return
 	}
-	merged := mergeEndpointPatch(*existing, req)
+	merged, err := mergeEndpointPatch(*existing, req)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
 	out, err := s.db.UpsertWebhookEndpoint(r.Context(), merged)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -160,13 +164,16 @@ func (s *Server) buildEndpointFromRequest(req webhookEndpointRequest, id string)
 	} else if strings.HasPrefix(signingKey, "whsk_") {
 		publicKey, _ = webhookspec.PublicKeyFromPrivateKey(signingKey)
 	}
+	if err := webhookpayload.ValidateEventTypes(req.EventTypes); err != nil {
+		return internaldb.WebhookEndpoint{}, err
+	}
 	return internaldb.WebhookEndpoint{
 		ID: id, WebhookURL: req.WebhookURL, SigningSecret: signingKey, SigningPublicKey: publicKey,
 		EventTypes: req.EventTypes, FailureNotifyEmail: strings.TrimSpace(req.FailureNotifyEmail),
 	}, nil
 }
 
-func mergeEndpointPatch(existing internaldb.WebhookEndpoint, req webhookEndpointPatchRequest) internaldb.WebhookEndpoint {
+func mergeEndpointPatch(existing internaldb.WebhookEndpoint, req webhookEndpointPatchRequest) (internaldb.WebhookEndpoint, error) {
 	if req.WebhookURL != nil {
 		existing.WebhookURL = strings.TrimSpace(*req.WebhookURL)
 	}
@@ -177,6 +184,9 @@ func mergeEndpointPatch(existing internaldb.WebhookEndpoint, req webhookEndpoint
 		}
 	}
 	if len(req.EventTypes) > 0 {
+		if err := webhookpayload.ValidateEventTypes(req.EventTypes); err != nil {
+			return existing, err
+		}
 		existing.EventTypes = req.EventTypes
 	}
 	if req.IsActive != nil {
@@ -185,7 +195,7 @@ func mergeEndpointPatch(existing internaldb.WebhookEndpoint, req webhookEndpoint
 	if req.FailureNotifyEmail != nil {
 		existing.FailureNotifyEmail = strings.TrimSpace(*req.FailureNotifyEmail)
 	}
-	return existing
+	return existing, nil
 }
 
 func webhookEndpointResponse(ep internaldb.WebhookEndpoint) map[string]any {

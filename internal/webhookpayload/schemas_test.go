@@ -8,7 +8,7 @@ import (
 )
 
 func TestEventSchemaJSON(t *testing.T) {
-	raw, err := webhookpayload.EventSchemaJSON(webhookpayload.TypeTransactionTRX)
+	raw, err := webhookpayload.EventSchemaJSON(webhookpayload.TypeTransactionTRXReceived)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -16,7 +16,7 @@ func TestEventSchemaJSON(t *testing.T) {
 		t.Fatal("invalid json schema")
 	}
 	all, err := webhookpayload.AllEventSchemas()
-	if err != nil || len(all) < 2 {
-		t.Fatalf("all schemas: %v", err)
+	if err != nil || len(all) != 4 {
+		t.Fatalf("all schemas: %v len=%d", err, len(all))
 	}
 }

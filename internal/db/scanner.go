@@ -509,6 +509,25 @@ func (c *Client) DeactivateWebhook(ctx context.Context, endpointID, reason strin
 	return tx.Commit(ctx)
 }
 
+// legacyWebhookDedupeExists reports whether an older dedupe_key format already recorded this transfer leg.
+func (c *Client) legacyWebhookDedupeExists(ctx context.Context, tx pgx.Tx, scope, txHash, from, to, amount, endpointID string) (bool, error) {
+	var exists bool
+	err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM webhook_events
+			WHERE scope = $1 AND tx_hash = $2
+			  AND COALESCE(payload->'data'->>'fromAddress', '') = $3
+			  AND COALESCE(payload->'data'->>'toAddress', '') = $4
+			  AND COALESCE(payload->'data'->>'amount', '') = $5
+			  AND (
+			    dedupe_key = ($1 || ':' || $2)
+			    OR ($6 <> '' AND dedupe_key = ($1 || ':' || $2 || ':' || $6))
+			  )
+		)
+	`, scope, txHash, from, to, amount, endpointID).Scan(&exists)
+	return exists, err
+}
+
 // EnqueueWebhookEvent inserts a matched event into the outbox (deduplicated).
 // The event id is generated here and injected into the payload before storage.
 func (c *Client) EnqueueWebhookEvent(ctx context.Context, eventType, scope, txHash string, blockNumber, blockTimestamp int64, payload any) (string, error) {
@@ -519,7 +538,10 @@ func (c *Client) EnqueueWebhookEvent(ctx context.Context, eventType, scope, txHa
 	if len(endpoints) == 0 {
 		return "", nil
 	}
-	stdType := webhookpayload.TransactionType(eventType)
+	stdType := webhookpayload.NormalizeEventType(eventType)
+	if !webhookpayload.IsKnownEventType(stdType) {
+		return "", fmt.Errorf("EnqueueWebhookEvent: unknown event type %q", stdType)
+	}
 
 	tx, err := c.Pool.Begin(ctx)
 	if err != nil {
@@ -530,7 +552,7 @@ func (c *Client) EnqueueWebhookEvent(ctx context.Context, eventType, scope, txHa
 	var firstID string
 	enqueued := 0
 	for _, ep := range endpoints {
-		if !ep.IsActive || !ep.SubscribesTo(stdType) {
+		if !ep.IsActive || !webhookpayload.EndpointSubscribes(ep.EventTypes, stdType) {
 			continue
 		}
 		id := newUUID()
@@ -548,6 +570,14 @@ func (c *Client) EnqueueWebhookEvent(ctx context.Context, eventType, scope, txHa
 		if !ok {
 			return "", fmt.Errorf("webhook payload must include a data object")
 		}
+		if typ, _ := payloadMap["type"].(string); typ != "" && typ != stdType {
+			return "", fmt.Errorf("EnqueueWebhookEvent: payload type %q does not match event type %q", typ, stdType)
+		}
+		payloadMap["type"] = stdType
+		fromAddr, _ := dataObj["fromAddress"].(string)
+		toAddr, _ := dataObj["toAddress"].(string)
+		amount, _ := dataObj["amount"].(string)
+		transferKey := webhookpayload.TransferDedupeKey(fromAddr, toAddr, amount)
 		dataObj["id"] = id
 		data, err := json.Marshal(payloadMap)
 		if err != nil {
@@ -557,17 +587,24 @@ func (c *Client) EnqueueWebhookEvent(ctx context.Context, eventType, scope, txHa
 			return "", err
 		}
 		var endpointID any
-		dedupeKey := fmt.Sprintf("%s:%s", scope, txHash)
+		dedupeKey := fmt.Sprintf("%s:%s:%s:%s", scope, txHash, stdType, transferKey)
 		if ep.ID != "" {
 			endpointID = ep.ID
-			dedupeKey = fmt.Sprintf("%s:%s:%s", scope, txHash, ep.ID)
+			dedupeKey = fmt.Sprintf("%s:%s:%s:%s:%s", scope, txHash, stdType, transferKey, ep.ID)
+		}
+		legacyDup, err := c.legacyWebhookDedupeExists(ctx, tx, scope, txHash, fromAddr, toAddr, amount, ep.ID)
+		if err != nil {
+			return "", err
+		}
+		if legacyDup {
+			continue
 		}
 		tag, err := tx.Exec(ctx, `
 			INSERT INTO webhook_events (
 				id, event_type, scope, tx_hash, block_number, block_timestamp, payload, dedupe_key, endpoint_id
 			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			ON CONFLICT (dedupe_key) DO NOTHING
-		`, id, eventType, scope, txHash, blockNumber, blockTimestamp, data, dedupeKey, endpointID)
+		`, id, stdType, scope, txHash, blockNumber, blockTimestamp, data, dedupeKey, endpointID)
 		if err != nil {
 			return "", fmt.Errorf("EnqueueWebhookEvent: %w", err)
 		}
