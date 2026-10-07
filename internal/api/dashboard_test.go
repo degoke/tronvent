@@ -307,9 +307,9 @@ func TestDashboardWatchlistPagination(t *testing.T) {
 }
 
 func TestDashboardWebhookPreservesSecret(t *testing.T) {
-	mem := &memDB{webhook: &internaldb.WebhookConfig{
-		WebhookURL: "https://old.example/hook", SigningSecret: "keep-me", IsActive: true, UpdatedAt: time.Now(),
-	}}
+	mem := &memDB{webhookEndpoints: []internaldb.WebhookEndpoint{{
+		ID: "ep-1", WebhookURL: "https://old.example/hook", SigningSecret: "keep-me", IsActive: true, UpdatedAt: time.Now(),
+	}}}
 	srv := newDashboardServer(t, mem)
 	session := dashboardSessionCookie(t, srv)
 	csrf := dashboardCSRFCookie(t, srv, session)
@@ -319,11 +319,11 @@ func TestDashboardWebhookPreservesSecret(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
-	if mem.webhook.SigningSecret != "keep-me" {
-		t.Fatalf("expected secret preserved, got %q", mem.webhook.SigningSecret)
+	if len(mem.webhookEndpoints) == 0 || mem.webhookEndpoints[0].SigningSecret != "keep-me" {
+		t.Fatalf("expected secret preserved, got %+v", mem.webhookEndpoints)
 	}
-	if mem.webhook.WebhookURL != "https://new.example/hook" {
-		t.Fatalf("expected URL updated, got %q", mem.webhook.WebhookURL)
+	if mem.webhookEndpoints[0].WebhookURL != "https://new.example/hook" {
+		t.Fatalf("expected URL updated, got %q", mem.webhookEndpoints[0].WebhookURL)
 	}
 }
 

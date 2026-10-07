@@ -14,6 +14,9 @@ import (
 	internaldb "github.com/degoke/tronvent/internal/db"
 	"github.com/degoke/tronvent/internal/store"
 	"github.com/degoke/tronvent/internal/webhook"
+	"github.com/degoke/tronvent/internal/webhookpayload"
+	"github.com/degoke/tronvent/internal/webhookspec"
+	standardwebhooks "github.com/standard-webhooks/standard-webhooks/libraries/go"
 )
 
 type workerDB struct {
@@ -41,11 +44,31 @@ func (w *workerDB) RecordWebhookDeliveryAttempt(_ context.Context, eventID strin
 	return nil
 }
 
+func (w *workerDB) DeactivateWebhook(_ context.Context, _ string, _ string) error {
+	return nil
+}
+
+func (w *workerDB) GetWebhookEndpoint(_ context.Context, _ string) (*internaldb.WebhookEndpoint, error) {
+	return nil, nil
+}
+
+func (w *workerDB) ListWebhookEndpoints(_ context.Context) ([]internaldb.WebhookEndpoint, error) {
+	return nil, nil
+}
+
+func testSigningSecret(t *testing.T) string {
+	secret, _, err := webhookspec.GenerateSigningKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return secret
+}
+
 func TestWorkerDeliversSignedWebhook(t *testing.T) {
 	var received atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get(webhook.HeaderSignature) == "" {
-			t.Error("missing signature header")
+		if r.Header.Get(standardwebhooks.HeaderWebhookSignature) == "" {
+			t.Error("missing webhook-signature header")
 		}
 		body, _ := io.ReadAll(r.Body)
 		if len(body) == 0 {
@@ -56,20 +79,24 @@ func TestWorkerDeliversSignedWebhook(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	secret := testSigningSecret(t)
 	cfgStore := store.NewWebhookConfigStore(nil)
-	cfgStore.Set(&internaldb.WebhookConfig{
-		WebhookURL:    srv.URL,
-		SigningSecret: "test-secret",
-		IsActive:      true,
+	cfgStore.UpsertEndpoint(internaldb.WebhookEndpoint{
+		ID: "ep-1", WebhookURL: srv.URL, SigningSecret: secret, IsActive: true,
 	})
 
-	payload, _ := json.Marshal(map[string]string{"type": "TRX", "txHash": "abc"})
+	payload, _ := json.Marshal(webhookpayload.Envelope{
+		Type:      webhookpayload.TypeTransactionTRXReceived,
+		Timestamp: webhookpayload.EventOccurredAt(1710000000000),
+		Data:      webhookpayload.TransactionData{ID: "evt-1", TxHash: "abc"},
+	})
 	db := &workerDB{events: []internaldb.WebhookEvent{{
 		ID: "evt-1", EventType: "TRX", Scope: "TRX", TxHash: "abc",
-		Payload: payload, AttemptCount: 0,
+		Payload: payload, AttemptCount: 0, CreatedAt: time.Now(),
 	}}}
 
-	worker := webhook.NewWorker(&config.Config{WebhookMaxAttempts: 3, WebhookHTTPTimeoutSeconds: 5}, db, cfgStore)
+	policy := webhookspec.URLPolicy{AllowHTTP: true, AllowPrivateHosts: true}
+	worker := webhook.NewWorker(&config.Config{WebhookMaxAttempts: 3, WebhookHTTPTimeoutSeconds: 5}, db, cfgStore, policy)
 	if err := worker.DispatchOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -86,17 +113,19 @@ func TestWorkerRetriesOn5xx(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	secret := testSigningSecret(t)
 	cfgStore := store.NewWebhookConfigStore(nil)
-	cfgStore.Set(&internaldb.WebhookConfig{WebhookURL: srv.URL, SigningSecret: "secret", IsActive: true})
+	cfgStore.UpsertEndpoint(internaldb.WebhookEndpoint{ID: "ep-1", WebhookURL: srv.URL, SigningSecret: secret, IsActive: true})
 
-	payload, _ := json.Marshal(map[string]string{"type": "TRX"})
+	payload, _ := json.Marshal(webhookpayload.NewDirectedTransactionEnvelope("TRX", webhookpayload.DirectionReceived, 1710000000000, webhookpayload.TransactionData{ID: "evt-2", TxHash: "x"}))
 	failed := false
 	db := &retryDB{
-		event:  internaldb.WebhookEvent{ID: "evt-2", EventType: "TRX", Scope: "TRX", TxHash: "x", Payload: payload},
+		event:  internaldb.WebhookEvent{ID: "evt-2", EventType: "TRX", Scope: "TRX", TxHash: "x", Payload: payload, CreatedAt: time.Now()},
 		onFail: func() { failed = true },
 	}
 
-	worker := webhook.NewWorker(&config.Config{WebhookMaxAttempts: 8}, db, cfgStore)
+	policy := webhookspec.URLPolicy{AllowHTTP: true, AllowPrivateHosts: true}
+	worker := webhook.NewWorker(&config.Config{WebhookMaxAttempts: 8}, db, cfgStore, policy)
 	if err := worker.DispatchOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -141,23 +170,37 @@ func (r *retryDB) RecordWebhookDeliveryAttempt(_ context.Context, eventID string
 	return nil
 }
 
+func (r *retryDB) DeactivateWebhook(_ context.Context, _ string, _ string) error {
+	return nil
+}
+
+func (r *retryDB) GetWebhookEndpoint(_ context.Context, _ string) (*internaldb.WebhookEndpoint, error) {
+	return nil, nil
+}
+
+func (r *retryDB) ListWebhookEndpoints(_ context.Context) ([]internaldb.WebhookEndpoint, error) {
+	return nil, nil
+}
+
 func TestWorkerManualRetryAfterMaximumUsesNextAttemptOnce(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer srv.Close()
 
+	secret := testSigningSecret(t)
 	cfgStore := store.NewWebhookConfigStore(nil)
-	cfgStore.Set(&internaldb.WebhookConfig{WebhookURL: srv.URL, SigningSecret: "secret", IsActive: true})
-	payload, _ := json.Marshal(map[string]string{"type": "TRX"})
+	cfgStore.UpsertEndpoint(internaldb.WebhookEndpoint{ID: "ep-1", WebhookURL: srv.URL, SigningSecret: secret, IsActive: true})
+	payload, _ := json.Marshal(webhookpayload.NewDirectedTransactionEnvelope("TRX", webhookpayload.DirectionReceived, 1710000000000, webhookpayload.TransactionData{ID: "evt-dead", TxHash: "dead"}))
 	db := &retryDB{
 		event: internaldb.WebhookEvent{
 			ID: "evt-dead", EventType: "TRX", Scope: "TRX", TxHash: "dead", Payload: payload,
-			AttemptCount: 8,
+			AttemptCount: 8, CreatedAt: time.Now(),
 		},
 	}
 
-	worker := webhook.NewWorker(&config.Config{WebhookMaxAttempts: 8}, db, cfgStore)
+	policy := webhookspec.URLPolicy{AllowHTTP: true, AllowPrivateHosts: true}
+	worker := webhook.NewWorker(&config.Config{WebhookMaxAttempts: 8}, db, cfgStore, policy)
 	if err := worker.DispatchOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}

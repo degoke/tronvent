@@ -1,0 +1,68 @@
+openapi: 3.1.0
+info:
+  title: Tronvent Webhook Event Schemas
+  version: 1.0.0
+  description: |
+    JSON payloads delivered to subscriber endpoints follow [Standard Webhooks](https://www.standardwebhooks.com)
+    (`webhook-id`, `webhook-timestamp`, `webhook-signature` headers).
+
+    Event types are direction-specific relative to watched addresses:
+    `transaction.trx.received`, `transaction.trx.broadcasted`, `transaction.trc20.received`,
+    and `transaction.trc20.broadcasted`.
+
+    Machine-readable JSON Schema files live in `internal/webhookpayload/schemas/` and are served from
+    `GET /api/v1/webhook/schemas`.
+
+paths:
+  /subscriber:
+    post:
+      summary: Incoming webhook (subscriber implements)
+      parameters:
+        - in: header
+          name: webhook-id
+          required: true
+          schema: { type: string }
+        - in: header
+          name: webhook-timestamp
+          required: true
+          schema: { type: integer }
+        - in: header
+          name: webhook-signature
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: '#/components/schemas/TransactionTRXReceived'
+                - $ref: '#/components/schemas/TransactionTRXBroadcasted'
+                - $ref: '#/components/schemas/TransactionTRC20Received'
+                - $ref: '#/components/schemas/TransactionTRC20Broadcasted'
+      responses:
+        '2xx':
+          description: Delivery accepted
+        '410':
+          description: |
+            Subscriber no longer wants events. Tronvent sets webhook_endpoints.is_active=false
+            for that endpoint. Re-enable via PATCH /api/v1/webhook/endpoints/{id} (isActive true).
+        '4xx':
+          description: Event marked dead immediately; endpoint stays active (except 410).
+        '5xx':
+          description: Retried per Standard Webhooks schedule until WEBHOOK_MAX_ATTEMPTS (default 10), then event is dead and endpoint may be disabled.
+
+components:
+  schemas:
+    TransactionTRXReceived:
+      type: object
+      description: See GET /api/v1/webhook/schemas/event?type=transaction.trx.received
+    TransactionTRXBroadcasted:
+      type: object
+      description: See GET /api/v1/webhook/schemas/event?type=transaction.trx.broadcasted
+    TransactionTRC20Received:
+      type: object
+      description: See GET /api/v1/webhook/schemas/event?type=transaction.trc20.received
+    TransactionTRC20Broadcasted:
+      type: object
+      description: See GET /api/v1/webhook/schemas/event?type=transaction.trc20.broadcasted

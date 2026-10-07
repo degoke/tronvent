@@ -17,6 +17,7 @@ import (
 	"github.com/degoke/tronvent/internal/scanner"
 	"github.com/degoke/tronvent/internal/store"
 	"github.com/degoke/tronvent/internal/webhook"
+	"github.com/degoke/tronvent/internal/webhookspec"
 	"github.com/lmittmann/tint"
 )
 
@@ -69,9 +70,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	webhookCfg, err := db.BootstrapWebhookConfig(ctx, cfg.WebhookURL, cfg.WebhookSigningSecret)
-	if err != nil {
-		slog.Error("bootstrap webhook config", "err", err)
+	if err := db.BootstrapWebhookEndpoints(ctx, cfg.WebhookURL, cfg.WebhookSigningSecret); err != nil {
+		slog.Error("bootstrap webhook endpoints", "err", err)
 		os.Exit(1)
 	}
 
@@ -146,10 +146,6 @@ func main() {
 		slog.Error("load webhook config", "err", err)
 		os.Exit(1)
 	}
-	if webhookCfg != nil {
-		webhookStore.Set(webhookCfg)
-	}
-
 	if cfg.StateResyncIntervalSeconds > 0 {
 		resyncInterval := time.Duration(cfg.StateResyncIntervalSeconds) * time.Second
 		go func() {
@@ -186,7 +182,7 @@ func main() {
 
 	go poller.RunReconciler(ctx)
 	go poller.Run(ctx)
-	go webhook.NewWorker(cfg, db, webhookStore).Run(ctx)
+	go webhook.NewWorker(cfg, db, webhookStore, webhookspec.URLPolicy{}).Run(ctx)
 
 	<-ctx.Done()
 	slog.Info("shutdown signal received, draining...")

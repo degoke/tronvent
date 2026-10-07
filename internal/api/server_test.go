@@ -15,16 +15,17 @@ import (
 	"github.com/degoke/tronvent/internal/config"
 	internaldb "github.com/degoke/tronvent/internal/db"
 	"github.com/degoke/tronvent/internal/store"
+	"github.com/degoke/tronvent/internal/webhookpayload"
 )
 
 type memDB struct {
-	addresses       []internaldb.WatchedAddress
-	contracts       []internaldb.WatchedContract
-	webhook         *internaldb.WebhookConfig
-	cursors         []internaldb.CursorRow
-	retries         []internaldb.RetryJobRecord
-	webhookEvents   []internaldb.DashboardWebhookEvent
-	webhookAttempts map[string][]internaldb.DashboardDeliveryAttempt
+	addresses        []internaldb.WatchedAddress
+	contracts        []internaldb.WatchedContract
+	webhookEndpoints []internaldb.WebhookEndpoint
+	cursors          []internaldb.CursorRow
+	retries          []internaldb.RetryJobRecord
+	webhookEvents    []internaldb.DashboardWebhookEvent
+	webhookAttempts  map[string][]internaldb.DashboardDeliveryAttempt
 }
 
 func (m *memDB) ListActiveAddresses(_ context.Context) ([]string, error) {
@@ -47,8 +48,8 @@ func (m *memDB) ListActiveContracts(_ context.Context) ([]string, error) {
 	return out, nil
 }
 
-func (m *memDB) GetWebhookConfig(_ context.Context) (*internaldb.WebhookConfig, error) {
-	return m.webhook, nil
+func (m *memDB) ListWebhookEndpoints(_ context.Context) ([]internaldb.WebhookEndpoint, error) {
+	return m.webhookEndpoints, nil
 }
 
 func (m *memDB) AddWatchedAddress(_ context.Context, address, source string) (internaldb.WatchedAddress, bool, error) {
@@ -131,12 +132,46 @@ func (m *memDB) ListContracts(_ context.Context, status string, limit int, after
 	return out, nil
 }
 
-func (m *memDB) UpsertWebhookConfig(_ context.Context, webhookURL, signingSecret string, isActive bool, source string) (*internaldb.WebhookConfig, error) {
-	cfg := &internaldb.WebhookConfig{
-		WebhookURL: webhookURL, SigningSecret: signingSecret, IsActive: isActive, Source: source, UpdatedAt: time.Now(),
+func (m *memDB) GetWebhookEndpoint(_ context.Context, endpointID string) (*internaldb.WebhookEndpoint, error) {
+	eps, _ := m.ListWebhookEndpoints(context.Background())
+	for _, ep := range eps {
+		if ep.ID == endpointID {
+			return &ep, nil
+		}
 	}
-	m.webhook = cfg
-	return cfg, nil
+	return nil, nil
+}
+
+func (m *memDB) DeleteWebhookEndpoint(_ context.Context, endpointID string) error {
+	return internaldb.ErrWebhookEndpointNotFound
+}
+
+func (m *memDB) UpsertWebhookEndpoint(_ context.Context, ep internaldb.WebhookEndpoint) (*internaldb.WebhookEndpoint, error) {
+	if ep.ID == "" {
+		ep.ID = "ep-1"
+	}
+	for i, cur := range m.webhookEndpoints {
+		if cur.ID == ep.ID {
+			m.webhookEndpoints[i] = ep
+			return &ep, nil
+		}
+	}
+	m.webhookEndpoints = append(m.webhookEndpoints, ep)
+	return &ep, nil
+}
+
+func (m *memDB) UpsertPrimaryWebhookEndpointPreserveSecret(_ context.Context, webhookURL, signingSecret string, isActive bool, source string, eventTypes []string) (*internaldb.WebhookEndpoint, error) {
+	ep := internaldb.WebhookEndpoint{
+		WebhookURL: webhookURL, SigningSecret: signingSecret, EventTypes: eventTypes,
+		IsActive: isActive, Source: source, UpdatedAt: time.Now(),
+	}
+	if len(m.webhookEndpoints) > 0 {
+		ep.ID = m.webhookEndpoints[0].ID
+		if signingSecret == "" {
+			ep.SigningSecret = m.webhookEndpoints[0].SigningSecret
+		}
+	}
+	return m.UpsertWebhookEndpoint(context.Background(), ep)
 }
 
 func (m *memDB) DeactivateWatchedAddress(_ context.Context, address string) (internaldb.WatchedAddress, error) {
@@ -208,13 +243,6 @@ func (m *memDB) ListRetryJobs(_ context.Context, status string, limit int) ([]in
 		}
 	}
 	return out, nil
-}
-
-func (m *memDB) UpsertWebhookConfigPreserveSecret(_ context.Context, webhookURL, signingSecret string, isActive bool, source string) (*internaldb.WebhookConfig, error) {
-	if signingSecret == "" && m.webhook != nil {
-		signingSecret = m.webhook.SigningSecret
-	}
-	return m.UpsertWebhookConfig(context.Background(), webhookURL, signingSecret, isActive, source)
 }
 
 func (m *memDB) ListWebhookEvents(_ context.Context, status string, limit int) ([]internaldb.DashboardWebhookEvent, error) {
@@ -335,8 +363,75 @@ func TestPutWebhookUpdatesConfig(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
 	}
-	if mem.webhook == nil || mem.webhook.WebhookURL != "https://example.com/hook" {
+	if len(mem.webhookEndpoints) == 0 || mem.webhookEndpoints[0].WebhookURL != "https://example.com/hook" {
 		t.Fatal("webhook config not saved")
+	}
+}
+
+func TestPostWebhookEndpointRejectsLegacyEventTypes(t *testing.T) {
+	mem := &memDB{}
+	srv := newTestServer(t, mem)
+	body, _ := json.Marshal(map[string]any{
+		"webhookUrl": "https://example.com/hooks/legacy",
+		"eventTypes": []string{"transaction.trx"},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhook/endpoints", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPatchWebhookEndpointRejectsLegacyEventTypes(t *testing.T) {
+	mem := &memDB{webhookEndpoints: []internaldb.WebhookEndpoint{{
+		ID: "ep-1", WebhookURL: "https://example.com/hooks/1", IsActive: true,
+		EventTypes: webhookpayload.DefaultEventTypes(),
+	}}}
+	srv := newTestServer(t, mem)
+	body, _ := json.Marshal(map[string]any{"eventTypes": []string{"transaction.trc20"}})
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/webhook/endpoints/ep-1", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPostWebhookEndpointAcceptsPartialEventTypes(t *testing.T) {
+	mem := &memDB{}
+	srv := newTestServer(t, mem)
+	body, _ := json.Marshal(map[string]any{
+		"webhookUrl": "https://example.com/hooks/partial",
+		"eventTypes": []string{webhookpayload.TypeTransactionTRXReceived},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhook/endpoints", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(mem.webhookEndpoints) != 1 || len(mem.webhookEndpoints[0].EventTypes) != 1 {
+		t.Fatalf("unexpected endpoint: %+v", mem.webhookEndpoints)
+	}
+}
+
+func TestPostWebhookEndpointCreates(t *testing.T) {
+	mem := &memDB{}
+	srv := newTestServer(t, mem)
+	body, _ := json.Marshal(map[string]string{"webhookUrl": "https://example.com/hooks/1"})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhook/endpoints", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(mem.webhookEndpoints) != 1 {
+		t.Fatalf("expected one endpoint, got %d", len(mem.webhookEndpoints))
 	}
 }
 

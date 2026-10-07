@@ -16,8 +16,7 @@
   curl http://127.0.0.1:8080/health
 {{- end }}
 
-3. Run database migrations before first deploy:
-   psql "$DATABASE_URL" -f migrations/001_scanner_schema.up.sql
+3. Run database migrations before first deploy: cmd/migrate or make migrate (DATABASE_URL set).
 
 4. Required secrets: DATABASE_URL, TRONGRID_API_KEY_SCANNER
    Recommended: ADMIN_API_TOKEN, WEBHOOK_SIGNING_SECRET

@@ -96,7 +96,7 @@ The filter reloads from Postgres on startup, on `LISTEN/NOTIFY` when addresses c
 ### Reliability
 
 - **Postgres outbox** — events are persisted before delivery; crashes do not lose matches.
-- **Webhook retries** — exponential backoff (1 m → 2 h) up to `WEBHOOK_MAX_ATTEMPTS` (default 8). Every attempt is logged in `webhook_delivery_attempts`.
+- **Webhook retries** — [Standard Webhooks](https://www.standardwebhooks.com) delivery schedule (up to 10 attempts over ~75h, with jitter). Every attempt is logged in `webhook_delivery_attempts`.
 - **Startup reconciliation** — if the scanner was offline and fell far behind, large gaps are enqueued as background block-range jobs instead of blocking the live poll loop.
 - **Admin replay** — manually re-scan a block or range via the admin API when you need to backfill.
 - **Prometheus metrics** — `/metrics` exposes blocks scanned, matches found, events published, and watchlist size.
@@ -263,6 +263,8 @@ See `charts/tronvent/values.yaml` for all configurable values including resource
 make migrate
 ```
 
+Requires `DATABASE_URL`. Applies all pending files under `migrations/` (tracked in `schema_migrations`). Notable migrations: `002` (webhook endpoints fanout), `003` (direction-specific default `event_types`), `004` (rewrites stored `transaction.trx` / `transaction.trc20` subscriptions to the four supported types), `005` (rewrites outbox `dedupe_key` to include event type and transfer leg).
+
 #### 2. Configure environment
 
 ```bash
@@ -365,11 +367,15 @@ Reference: [TRON network endpoints](https://developers.tron.network/docs/connect
 
 | Variable | Default | Description |
 |---|---|---|
-| `WEBHOOK_URL` | — | Bootstrap webhook URL (overridden by admin API) |
-| `WEBHOOK_SIGNING_SECRET` | — | HMAC-SHA256 signing secret |
-| `WEBHOOK_MAX_ATTEMPTS` | `8` | Max delivery attempts per event |
+| `WEBHOOK_URL` | — | Bootstrap primary endpoint URL when `webhook_endpoints` is empty |
+| `WEBHOOK_SIGNING_SECRET` | — | Optional `whsec_` / `whsk_` key for bootstrap (legacy plaintext is auto-wrapped to `whsec_` if ≥24 bytes); ed25519 key pair generated if omitted |
+| `WEBHOOK_MAX_ATTEMPTS` | `10` | Delivery attempts per outbox event before status `dead` (max **10**, Standard Webhooks schedule) |
 | `WEBHOOK_POLL_INTERVAL_MS` | `1000` | Outbox poll interval |
 | `WEBHOOK_HTTP_TIMEOUT_SECONDS` | `30` | Delivery HTTP timeout |
+| `WEBHOOK_NOTIFY_SMTP_HOST` | — | Optional SMTP host for endpoint failure emails |
+| `WEBHOOK_NOTIFY_SMTP_PORT` | `587` | SMTP port |
+| `WEBHOOK_NOTIFY_SMTP_USER` / `WEBHOOK_NOTIFY_SMTP_PASS` | — | SMTP credentials |
+| `WEBHOOK_NOTIFY_SMTP_FROM` | — | From address for failure notifications |
 
 ### Server
 
@@ -395,8 +401,15 @@ All `/api/v1/*` routes require `Authorization: Bearer <ADMIN_API_TOKEN>`.
 | `POST` | `/api/v1/contracts` | Add watched TRC-20 contract |
 | `GET` | `/api/v1/contracts` | List contracts |
 | `DELETE` | `/api/v1/contracts/{contractAddress}` | Deactivate contract |
-| `PUT` | `/api/v1/webhook` | Set webhook URL and signing secret |
+| `PUT` | `/api/v1/webhook` | Set primary webhook endpoint URL (optional signing secret; generated if missing) |
 | `GET` | `/api/v1/webhook` | Get webhook config (secret not returned) |
+| `GET` | `/api/v1/webhook/endpoints` | List subscriber endpoints |
+| `POST` | `/api/v1/webhook/endpoints` | Create endpoint (generates ed25519 keys if omitted) |
+| `GET` | `/api/v1/webhook/endpoints/{id}` | Get one endpoint |
+| `PATCH` | `/api/v1/webhook/endpoints/{id}` | Update URL, event types, active flag, notify email, or signing key |
+| `DELETE` | `/api/v1/webhook/endpoints/{id}` | Remove endpoint |
+| `GET` | `/api/v1/webhook/schemas` | JSON Schemas for all event types |
+| `GET` | `/api/v1/webhook/schemas/event?type=transaction.trx.received` | One event type schema |
 | `GET` | `/api/v1/webhooks?status=failed&limit=50` | List webhook events (`status=dead` or `status=all` are also supported) |
 | `GET` | `/api/v1/webhooks/{eventID}/attempts` | List delivery attempts for one webhook event |
 | `POST` | `/api/v1/webhooks/{eventID}/retry` | Retry one failed or dead webhook event |
@@ -412,48 +425,83 @@ Address and contract changes propagate to the in-memory Bloom filter immediately
 
 ## Webhook payload
 
-Each delivery is a `POST` with JSON body and signed headers:
+Each delivery is a `POST` with a [Standard Webhooks](https://www.standardwebhooks.com) JSON body and headers:
 
 ```
-X-Tronvent-Event-Id:    <uuid>
-X-Tronvent-Event-Type:  TRX | TRC20
-X-Tronvent-Timestamp:   <unix seconds>
-X-Tronvent-Signature:   sha256=<hex hmac>
+webhook-id:             <uuid> (same as data.id)
+webhook-timestamp:      <unix seconds> (delivery attempt time)
+webhook-signature:      v1,<base64 hmac>
 Content-Type:           application/json
 ```
 
-**Body example:**
+**Body example** (`transaction.trc20.received`):
 
 ```json
 {
-  "id": "550e8400-e29b-41d4-a716-446655440000",
-  "type": "TRC20",
-  "txHash": "abc123...",
-  "fromAddress": "TXyz...",
-  "toAddress": "TAbc...",
-  "amount": "1000000",
-  "tokenContractAddress": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
-  "blockNumber": 65432100,
-  "blockTimestamp": 1719234567000,
-  "confirmations": 5
+  "type": "transaction.trc20.received",
+  "timestamp": "2024-06-24T15:04:05.123456789Z",
+  "data": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "txHash": "abc123...",
+    "fromAddress": "TXyz...",
+    "toAddress": "TAbc...",
+    "amount": "1000000",
+    "tokenContractAddress": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
+    "blockNumber": 65432100,
+    "blockTimestamp": 1719234567000,
+    "confirmations": 5
+  }
 }
 ```
 
-For TRC-20, `amount` is the raw token value (check contract decimals). For TRX, it is a decimal string in TRX units.
+Supported event types (asset + direction relative to watched addresses):
+
+| Type | Meaning |
+|------|---------|
+| `transaction.trx.received` | Watched address received TRX |
+| `transaction.trx.broadcasted` | Watched address sent TRX |
+| `transaction.trc20.received` | Watched address received a TRC-20 transfer |
+| `transaction.trc20.broadcasted` | Watched address sent a TRC-20 transfer |
+
+**Received** means a watched address is the transfer recipient; **broadcasted** means a watched address is the sender. A self-transfer to the same watched address can emit both event types (two deliveries).
+
+The top-level `timestamp` is when the transfer occurred (block time, ISO 8601 UTC). For TRC-20, `data.amount` is the raw token value (check contract decimals). For TRX, it is a decimal string in TRX units.
 
 ### Verify signatures
 
-The signature is `HMAC-SHA256(secret, timestamp + "." + raw_body)`:
+Signed content is `webhook_id + "." + webhook_timestamp + "." + raw_body`, with `HMAC-SHA256` and a `v1,<base64>` `webhook-signature` header (space-separated when multiple keys are active during rotation). Reject requests outside the timestamp tolerance (replay protection) or when no signature matches.
 
-```go
-mac := hmac.New(sha256.New, []byte(secret))
-mac.Write([]byte(strconv.FormatInt(timestamp, 10)))
-mac.Write([]byte("."))
-mac.Write(rawBody)
-expected := "sha256=" + hex.EncodeToString(mac.Sum(nil))
-```
+Signing keys use Standard Webhooks serialization:
 
-Reject requests where the timestamp is too old (replay protection) or the signature does not match.
+- **Preferred (asymmetric):** `whsk_` private (signs `v1a,<base64>` ed25519) and `whpk_` public (returned from the API for verification).
+- **Symmetric:** `whsec_` + base64 (signs `v1,<base64>` HMAC-SHA256).
+
+New endpoints default to ed25519. Libraries: [standard-webhooks/libraries](https://github.com/standard-webhooks/standard-webhooks/tree/main/libraries).
+
+### Delivery behavior
+
+Tronvent implements the Standard Webhooks producer guidelines:
+
+- **HTTPS-only** subscriber URLs (private/link-local/metadata hosts blocked at config and connect time).
+- **No redirect following** — `3xx` responses are terminal failures.
+- **Retries** — up to **`WEBHOOK_MAX_ATTEMPTS`** per outbox row (default **10**, hard-capped at the spec table). Spacing follows the [Standard Webhooks retry schedule](https://www.standardwebhooks.com) (~75h total, with jitter). `429`, `5xx`, `502`, and `504` are retried; `Retry-After` is honored when present. After the last failed attempt the event is marked **`dead`** in the outbox (it is not delivered further until you call the retry API). Other **4xx** and **3xx** responses mark the event **`dead`** immediately (no endpoint disable). Invalid subscriber URL, signing configuration, oversize payload, or inactive endpoint also mark the event **`dead`** (fix config and use retry API).
+- **Stuck deliveries** — rows left in `delivering` after a worker crash are reclaimed after **5 minutes** (`attempt_count` is incremented on reclaim).
+- **Endpoint auto-disable** — the **subscriber endpoint** (`webhook_endpoints.is_active`) is set to `false` when:
+  - the subscriber returns **`410 Gone`** (immediate), or
+  - a delivery exhausts **`WEBHOOK_MAX_ATTEMPTS`** retryable failures for that event (chronic failure).
+  Disabled endpoints stop receiving new fanout; existing pending rows for that endpoint may still be attempted until they die or you retry them.
+- **Re-enable an endpoint** — there is no automatic reactivation. Set `isActive` back to `true`:
+  - `PATCH /api/v1/webhook/endpoints/{id}` with `{"isActive": true}` (fix URL or signing key in the same request if needed), or
+  - dashboard **Webhooks** → enable **Active** on the primary endpoint, or
+  - `PUT /api/v1/webhook` (updates the primary endpoint and sets it active).
+  After re-enabling, use `POST /api/v1/webhooks/{eventID}/retry` or **retry-all** for `failed`/`dead` events you still want delivered.
+- **Event filtering** — per-endpoint `eventTypes` (default: all four direction-specific types above). An empty stored list is treated the same as the default at delivery time. Unsubscribed events are not enqueued.
+- **Fanout** — multiple endpoints via `GET/POST/PATCH/DELETE /api/v1/webhook/endpoints/{id}` (one outbox row per endpoint).
+- **Failure notification** — optional `failureNotifyEmail` per endpoint; configure `WEBHOOK_NOTIFY_SMTP_*` to send email when an endpoint is auto-disabled (410 or chronic failure).
+- **Payload size** — rejected above **20 KB** at enqueue time.
+- **Schemas** — JSON Schema in `internal/webhookpayload/schemas/` (one file per event type); API `GET /api/v1/webhook/schemas` and `GET /api/v1/webhook/schemas/event?type=<eventType>`; OpenAPI sketch in `docs/webhooks/openapi.yaml`.
+
+**Static egress IPs:** configure your firewall from the outbound IPs of the host or NAT gateway running Tronvent (not assigned by the app).
 
 ---
 

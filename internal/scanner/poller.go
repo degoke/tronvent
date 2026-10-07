@@ -14,6 +14,7 @@ import (
 	"github.com/degoke/tronvent/internal/config"
 	internaldb "github.com/degoke/tronvent/internal/db"
 	"github.com/degoke/tronvent/internal/metrics"
+	"github.com/degoke/tronvent/internal/webhookpayload"
 )
 
 // blockBatchSize is the maximum number of blocks fetched in a single
@@ -26,23 +27,10 @@ const (
 	queueWorkerID       = "tronvent"
 )
 
-// WebhookPayload is the signed webhook body delivered to subscribers.
-type WebhookPayload struct {
-	ID                   string `json:"id"`
-	Type                 string `json:"type"`
-	TxHash               string `json:"txHash"`
-	FromAddress          string `json:"fromAddress"`
-	ToAddress            string `json:"toAddress"`
-	Amount               string `json:"amount"`
-	TokenContractAddress string `json:"tokenContractAddress,omitempty"`
-	BlockNumber          int64  `json:"blockNumber"`
-	BlockTimestamp       int64  `json:"blockTimestamp"`
-	Confirmations        int64  `json:"confirmations"`
-}
-
 // RawEvent is the in-process matched chain event before outbox persistence.
 type RawEvent struct {
 	Type                 string
+	Direction            string
 	TxHash               string
 	FromAddress          string
 	ToAddress            string
@@ -53,10 +41,8 @@ type RawEvent struct {
 	Confirmations        int64
 }
 
-func rawToWebhookPayload(id string, ev RawEvent) WebhookPayload {
-	return WebhookPayload{
-		ID:                   id,
-		Type:                 ev.Type,
+func rawToWebhookEnvelope(ev RawEvent) webhookpayload.Envelope {
+	return webhookpayload.NewDirectedTransactionEnvelope(ev.Type, ev.Direction, ev.BlockTimestamp, webhookpayload.TransactionData{
 		TxHash:               ev.TxHash,
 		FromAddress:          ev.FromAddress,
 		ToAddress:            ev.ToAddress,
@@ -65,7 +51,7 @@ func rawToWebhookPayload(id string, ev RawEvent) WebhookPayload {
 		BlockNumber:          ev.BlockNumber,
 		BlockTimestamp:       ev.BlockTimestamp,
 		Confirmations:        ev.Confirmations,
-	}
+	})
 }
 
 // tronGridBlock is a partial deserialisation of TronGrid's block response.
@@ -399,29 +385,28 @@ func (p *Poller) scanTrx(ctx context.Context, latestBlock int64) error {
 					batchTxTotal++
 					toAddr := hexToBase58(c.Parameter.Value.ToAddress)
 					fromAddr := hexToBase58(c.Parameter.Value.OwnerAddress)
-					if !p.addresses.Contains(toAddr) && !p.addresses.Contains(fromAddr) {
+					amount := sunToTrx(c.Parameter.Value.Amount)
+					matched := p.matchedTransferEvents(
+						"TRX", tx.TxID, fromAddr, toAddr, amount, "",
+						blockNum, block.BlockHeader.RawData.Timestamp,
+					)
+					if len(matched) == 0 {
 						continue
 					}
-					amount := sunToTrx(c.Parameter.Value.Amount)
-					batchMatched++
-					metrics.MatchesFound.Inc()
-					slog.Info(
-						"[TRANSACTION] TRX",
-						"address", toAddr,
-						"txHash", tx.TxID,
-						"from", fromAddr,
-						"amount", amount,
-						"block", blockNum,
-					)
-					events = append(events, RawEvent{
-						Type:           "TRX",
-						TxHash:         tx.TxID,
-						FromAddress:    fromAddr,
-						ToAddress:      toAddr,
-						Amount:         amount,
-						BlockNumber:    blockNum,
-						BlockTimestamp: block.BlockHeader.RawData.Timestamp,
-					})
+					batchMatched += len(matched)
+					for _, ev := range matched {
+						metrics.MatchesFound.Inc()
+						slog.Info(
+							"[TRANSACTION] TRX",
+							"direction", ev.Direction,
+							"txHash", tx.TxID,
+							"from", fromAddr,
+							"to", toAddr,
+							"amount", amount,
+							"block", blockNum,
+						)
+					}
+					events = append(events, matched...)
 				}
 			} else {
 				slog.Debug("TRX block missing from range response", "block", blockNum)
@@ -542,9 +527,9 @@ func (p *Poller) scanTrc20(ctx context.Context, contract string, latestBlock int
 			"count", len(allEvents),
 		)
 		eventsByBlock := make(map[int64][]RawEvent)
-		seenTxHashes := make(map[string]struct{}) // deduplicate: one event per txHash
-		eventsTotal := 0                          // events from chain within this block window
-		matchedCount := 0                         // matched to a watched address
+		seenTransferKeys := make(map[string]struct{}) // dedupe per transfer leg in this batch
+		eventsTotal := 0                              // events from chain within this block window
+		matchedCount := 0                             // matched to a watched address
 		for _, e := range allEvents {
 			// Guard: only include events within our batch window.
 			if e.BlockNumber < batchStart || e.BlockNumber > batchEnd {
@@ -555,38 +540,34 @@ func (p *Poller) scanTrc20(ctx context.Context, contract string, latestBlock int
 			// base58. Normalise before the HashSet lookup so both formats match.
 			toAddr := hexToBase58(e.Result.To)
 			fromAddr := hexToBase58(e.Result.From)
-			if !p.addresses.Contains(toAddr) && !p.addresses.Contains(fromAddr) {
-				continue
-			}
-			// A single transaction can emit multiple Transfer events (e.g. multi-hop).
-			// Publish only the first matching event per txHash — the processor handles
-			// both sender and receiver from the one event.
-			if _, seen := seenTxHashes[e.TransactionID]; seen {
-				slog.Debug("TRC20 duplicate txHash skipped", "txHash", e.TransactionID, "contract", contract)
-				continue
-			}
-			seenTxHashes[e.TransactionID] = struct{}{}
-			matchedCount++
-			metrics.MatchesFound.Inc()
-			slog.Info(
-				"[EVENT] TRC20",
-				"address", toAddr,
-				"txHash", e.TransactionID,
-				"from", fromAddr,
-				"amount", e.Result.Value,
-				"contract", contract,
-				"block", e.BlockNumber,
+			matched := p.matchedTransferEvents(
+				"TRC20", e.TransactionID, fromAddr, toAddr, e.Result.Value, contract,
+				e.BlockNumber, e.BlockTimestamp,
 			)
-			eventsByBlock[e.BlockNumber] = append(eventsByBlock[e.BlockNumber], RawEvent{
-				Type:                 "TRC20",
-				TxHash:               e.TransactionID,
-				FromAddress:          fromAddr,
-				ToAddress:            toAddr,
-				Amount:               e.Result.Value,
-				TokenContractAddress: contract,
-				BlockNumber:          e.BlockNumber,
-				BlockTimestamp:       e.BlockTimestamp,
-			})
+			if len(matched) == 0 {
+				continue
+			}
+			for _, ev := range matched {
+				key := transferEventKey(ev)
+				if _, seen := seenTransferKeys[key]; seen {
+					slog.Debug("TRC20 duplicate transfer key skipped", "key", key, "contract", contract)
+					continue
+				}
+				seenTransferKeys[key] = struct{}{}
+				matchedCount++
+				metrics.MatchesFound.Inc()
+				slog.Info(
+					"[EVENT] TRC20",
+					"direction", ev.Direction,
+					"txHash", e.TransactionID,
+					"from", fromAddr,
+					"to", toAddr,
+					"amount", e.Result.Value,
+					"contract", contract,
+					"block", e.BlockNumber,
+				)
+				eventsByBlock[e.BlockNumber] = append(eventsByBlock[e.BlockNumber], ev)
+			}
 		}
 
 		// Commit: publish events per block, then advance cursor with a retain window
@@ -713,27 +694,23 @@ func (p *Poller) replayTrxRange(ctx context.Context, fromBlock, toBlock int64) e
 				}
 				toAddr := hexToBase58(c.Parameter.Value.ToAddress)
 				fromAddr := hexToBase58(c.Parameter.Value.OwnerAddress)
-				if !p.addresses.Contains(toAddr) && !p.addresses.Contains(fromAddr) {
-					continue
-				}
 				amount := sunToTrx(c.Parameter.Value.Amount)
-				slog.Info(
-					"[REPLAY][TRANSACTION] TRX",
-					"address", toAddr,
-					"txHash", tx.TxID,
-					"from", fromAddr,
-					"amount", amount,
-					"block", blockNum,
+				matched := p.matchedTransferEvents(
+					"TRX", tx.TxID, fromAddr, toAddr, amount, "",
+					blockNum, block.BlockHeader.RawData.Timestamp,
 				)
-				events = append(events, RawEvent{
-					Type:           "TRX",
-					TxHash:         tx.TxID,
-					FromAddress:    fromAddr,
-					ToAddress:      toAddr,
-					Amount:         amount,
-					BlockNumber:    blockNum,
-					BlockTimestamp: block.BlockHeader.RawData.Timestamp,
-				})
+				for _, ev := range matched {
+					slog.Info(
+						"[REPLAY][TRANSACTION] TRX",
+						"direction", ev.Direction,
+						"txHash", tx.TxID,
+						"from", fromAddr,
+						"to", toAddr,
+						"amount", amount,
+						"block", blockNum,
+					)
+				}
+				events = append(events, matched...)
 			}
 			if len(events) > 0 {
 				slog.Debug("[REPLAY] TRX events matched", "block", blockNum, "count", len(events))
@@ -786,7 +763,7 @@ func (p *Poller) replayTrc20Range(ctx context.Context, contract string, fromBloc
 			"count", len(allEvents),
 		)
 		eventsByBlock := make(map[int64][]RawEvent)
-		seenTxHashes := make(map[string]struct{})
+		seenTransferKeys := make(map[string]struct{})
 		matchedCount := 0
 		for _, e := range allEvents {
 			if e.BlockNumber < batchStart || e.BlockNumber > batchEnd {
@@ -808,34 +785,30 @@ func (p *Poller) replayTrc20Range(ctx context.Context, contract string, fromBloc
 				"toInWatchlist", toMatched,
 				"fromInWatchlist", fromMatched,
 			)
-			if !toMatched && !fromMatched {
-				continue
-			}
-			if _, seen := seenTxHashes[e.TransactionID]; seen {
-				slog.Debug("[REPLAY] TRC20 duplicate txHash skipped", "txHash", e.TransactionID, "contract", contract)
-				continue
-			}
-			seenTxHashes[e.TransactionID] = struct{}{}
-			matchedCount++
-			slog.Info(
-				"[REPLAY][EVENT] TRC20",
-				"address", toAddr,
-				"txHash", e.TransactionID,
-				"from", fromAddr,
-				"amount", e.Result.Value,
-				"contract", contract,
-				"block", e.BlockNumber,
+			matched := p.matchedTransferEvents(
+				"TRC20", e.TransactionID, fromAddr, toAddr, e.Result.Value, contract,
+				e.BlockNumber, e.BlockTimestamp,
 			)
-			eventsByBlock[e.BlockNumber] = append(eventsByBlock[e.BlockNumber], RawEvent{
-				Type:                 "TRC20",
-				TxHash:               e.TransactionID,
-				FromAddress:          fromAddr,
-				ToAddress:            toAddr,
-				Amount:               e.Result.Value,
-				TokenContractAddress: contract,
-				BlockNumber:          e.BlockNumber,
-				BlockTimestamp:       e.BlockTimestamp,
-			})
+			for _, ev := range matched {
+				key := transferEventKey(ev)
+				if _, seen := seenTransferKeys[key]; seen {
+					slog.Debug("[REPLAY] TRC20 duplicate transfer key skipped", "key", key, "contract", contract)
+					continue
+				}
+				seenTransferKeys[key] = struct{}{}
+				matchedCount++
+				slog.Info(
+					"[REPLAY][EVENT] TRC20",
+					"direction", ev.Direction,
+					"txHash", e.TransactionID,
+					"from", fromAddr,
+					"to", toAddr,
+					"amount", e.Result.Value,
+					"contract", contract,
+					"block", e.BlockNumber,
+				)
+				eventsByBlock[e.BlockNumber] = append(eventsByBlock[e.BlockNumber], ev)
+			}
 		}
 		publishedCount := 0
 		for blockNum := batchStart; blockNum <= batchEnd; blockNum++ {
@@ -874,7 +847,8 @@ func (p *Poller) saveHighestBlock(ctx context.Context, scope string, blockNum in
 func (p *Poller) enqueueOutboxEvents(ctx context.Context, scope string, events []RawEvent) (int, error) {
 	enqueued := 0
 	for _, ev := range events {
-		id, err := p.outbox.EnqueueWebhookEvent(ctx, ev.Type, scope, ev.TxHash, ev.BlockNumber, ev.BlockTimestamp, rawToWebhookPayload("", ev))
+		stdType := webhookpayload.TransferEventType(ev.Type, ev.Direction)
+		id, err := p.outbox.EnqueueWebhookEvent(ctx, stdType, scope, ev.TxHash, ev.BlockNumber, ev.BlockTimestamp, rawToWebhookEnvelope(ev))
 		if err != nil {
 			return enqueued, err
 		}

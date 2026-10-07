@@ -44,6 +44,11 @@ type Config struct {
 	WebhookMaxAttempts        int
 	WebhookPollIntervalMs     int64
 	WebhookHTTPTimeoutSeconds int64
+	WebhookNotifySMTPHost     string
+	WebhookNotifySMTPPort     int
+	WebhookNotifySMTPUser     string
+	WebhookNotifySMTPPass     string
+	WebhookNotifySMTPFrom     string
 
 	// Admin API auth
 	AdminAPIToken string
@@ -124,9 +129,14 @@ func Load() (cfg *Config, err error) {
 		ReconcileBatchSize:         envInt64OrDefault("TRON_RECONCILE_BATCH_SIZE", 1000),
 		WebhookURL:                 os.Getenv("WEBHOOK_URL"),
 		WebhookSigningSecret:       os.Getenv("WEBHOOK_SIGNING_SECRET"),
-		WebhookMaxAttempts:         int(envInt64OrDefault("WEBHOOK_MAX_ATTEMPTS", 8)),
+		WebhookMaxAttempts:         int(envInt64OrDefault("WEBHOOK_MAX_ATTEMPTS", 10)),
 		WebhookPollIntervalMs:      envInt64OrDefault("WEBHOOK_POLL_INTERVAL_MS", 1000),
 		WebhookHTTPTimeoutSeconds:  envInt64OrDefault("WEBHOOK_HTTP_TIMEOUT_SECONDS", 30),
+		WebhookNotifySMTPHost:      os.Getenv("WEBHOOK_NOTIFY_SMTP_HOST"),
+		WebhookNotifySMTPPort:      int(envInt64OrDefault("WEBHOOK_NOTIFY_SMTP_PORT", 587)),
+		WebhookNotifySMTPUser:      os.Getenv("WEBHOOK_NOTIFY_SMTP_USER"),
+		WebhookNotifySMTPPass:      os.Getenv("WEBHOOK_NOTIFY_SMTP_PASS"),
+		WebhookNotifySMTPFrom:      os.Getenv("WEBHOOK_NOTIFY_SMTP_FROM"),
 		AdminAPIToken:              os.Getenv("ADMIN_API_TOKEN"),
 		StateResyncIntervalSeconds: envInt64OrDefault("STATE_RESYNC_INTERVAL_SECONDS", 0),
 	}

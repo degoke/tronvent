@@ -462,12 +462,12 @@ func (s *Server) handleDashboardWebhookSettings(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	cfg, err := s.db.UpsertWebhookConfigPreserveSecret(r.Context(), webhookURL, signingSecret, isActive, "dashboard")
+	ep, err := s.db.UpsertPrimaryWebhookEndpointPreserveSecret(r.Context(), webhookURL, signingSecret, isActive, "dashboard", nil)
 	if err != nil {
 		s.handleDashboardWebhooks(w, r)
 		return
 	}
-	s.webhookConfig.Set(cfg)
+	s.webhookConfig.UpsertEndpoint(*ep)
 	s.handleDashboardWebhooks(w, r)
 }
 
