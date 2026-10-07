@@ -1,5 +1,6 @@
 GO ?= go
-GOLANGCI_LINT ?= golangci-lint
+GOLANGCI_LINT_PKG ?= github.com/golangci/golangci-lint/v2/cmd/golangci-lint
+GOLANGCI_LINT_VERSION ?= v2.12.0
 GOFUMPT ?= gofumpt
 
 BINARY ?= tronvent
@@ -31,7 +32,7 @@ test:
 	$(GO) test ./...
 
 lint:
-	$(GOLANGCI_LINT) run ./...
+	$(GO) run $(GOLANGCI_LINT_PKG)@$(GOLANGCI_LINT_VERSION) run ./...
 
 format fmt:
 	$(GO) fmt ./...

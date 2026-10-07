@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/degoke/tronvent/internal/webhookspec"
 	"github.com/degoke/tronvent/internal/webhookpayload"
+	"github.com/degoke/tronvent/internal/webhookspec"
 	"github.com/jackc/pgx/v5"
 )
 

@@ -316,4 +316,3 @@ func (c *Client) UpsertPrimaryWebhookEndpointPreserveSecret(ctx context.Context,
 	}
 	return c.UpsertWebhookEndpoint(ctx, ep)
 }
-

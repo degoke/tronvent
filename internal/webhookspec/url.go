@@ -28,7 +28,7 @@ func (p URLPolicy) ValidateWebhookURL(raw string) error {
 		return fmt.Errorf("webhook URL must be absolute")
 	}
 	scheme := strings.ToLower(u.Scheme)
-	if scheme != "https" && !(p.AllowHTTP && scheme == "http") {
+	if scheme != "https" && (scheme != "http" || !p.AllowHTTP) {
 		return fmt.Errorf("webhook URL must use https")
 	}
 	host := strings.ToLower(u.Hostname())

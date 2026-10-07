@@ -14,8 +14,8 @@ import (
 	"github.com/degoke/tronvent/internal/config"
 	internaldb "github.com/degoke/tronvent/internal/db"
 	"github.com/degoke/tronvent/internal/store"
-	"github.com/degoke/tronvent/internal/webhookpayload"
 	"github.com/degoke/tronvent/internal/validate"
+	"github.com/degoke/tronvent/internal/webhookpayload"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 

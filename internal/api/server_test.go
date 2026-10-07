@@ -19,13 +19,13 @@ import (
 )
 
 type memDB struct {
-	addresses       []internaldb.WatchedAddress
-	contracts       []internaldb.WatchedContract
+	addresses        []internaldb.WatchedAddress
+	contracts        []internaldb.WatchedContract
 	webhookEndpoints []internaldb.WebhookEndpoint
-	cursors         []internaldb.CursorRow
-	retries         []internaldb.RetryJobRecord
-	webhookEvents   []internaldb.DashboardWebhookEvent
-	webhookAttempts map[string][]internaldb.DashboardDeliveryAttempt
+	cursors          []internaldb.CursorRow
+	retries          []internaldb.RetryJobRecord
+	webhookEvents    []internaldb.DashboardWebhookEvent
+	webhookAttempts  map[string][]internaldb.DashboardDeliveryAttempt
 }
 
 func (m *memDB) ListActiveAddresses(_ context.Context) ([]string, error) {

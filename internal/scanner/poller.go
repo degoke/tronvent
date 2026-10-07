@@ -528,8 +528,8 @@ func (p *Poller) scanTrc20(ctx context.Context, contract string, latestBlock int
 		)
 		eventsByBlock := make(map[int64][]RawEvent)
 		seenTransferKeys := make(map[string]struct{}) // dedupe per transfer leg in this batch
-		eventsTotal := 0                          // events from chain within this block window
-		matchedCount := 0                         // matched to a watched address
+		eventsTotal := 0                              // events from chain within this block window
+		matchedCount := 0                             // matched to a watched address
 		for _, e := range allEvents {
 			// Guard: only include events within our batch window.
 			if e.BlockNumber < batchStart || e.BlockNumber > batchEnd {

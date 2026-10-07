@@ -102,7 +102,12 @@ func (s stubContracts) List() []string {
 	return append([]string(nil), s.contracts...)
 }
 
-const knownTRC20Address = "TTestWatchedXXXXXXXXXXXXXXXXXXXXXXXX"
+const (
+	knownTRC20Address  = "TTestWatchedXXXXXXXXXXXXXXXXXXXXXXXX"
+	watchedTRXSender   = "TSenderWatchedXXXXXXXXXXXXXXXXXXXXXXX"
+	watchedTRXReceiver = "TReceiverWatchedXXXXXXXXXXXXXXXXXXXXX"
+	watchedTRXSelf     = "TSelfWatchedXXXXXXXXXXXXXXXXXXXXXXXXX"
+)
 
 func mockTronGridServer(t *testing.T) *httptest.Server {
 	t.Helper()
@@ -362,10 +367,6 @@ func TestPoller_RetryBlockRange(t *testing.T) {
 	}
 }
 
-const watchedTRXSender = "TSenderWatchedXXXXXXXXXXXXXXXXXXXXXXX"
-const watchedTRXReceiver = "TReceiverWatchedXXXXXXXXXXXXXXXXXXXXX"
-const watchedTRXSelf = "TSelfWatchedXXXXXXXXXXXXXXXXXXXXXXXXX"
-
 func TestPoller_TRC20MultipleTransfersSameTx(t *testing.T) {
 	const contract = "TXLAQ63Xg1NAzckPwKHvzw7CSEmLMEqcdj"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -400,7 +401,7 @@ func TestPoller_TRC20MultipleTransfersSameTx(t *testing.T) {
 
 	p := &Poller{
 		cfg: &config.Config{TronGridBaseURL: srv.URL, TronGridAPIKey: "test", RequiredConfs: 0, Trc20EventConfs: 0, Trc20CursorRetain: 0, Trc20EventRetries: 1},
-		db: dbStub, outbox: outbox, addresses: NewHashSet([]string{knownTRC20Address}),
+		db:  dbStub, outbox: outbox, addresses: NewHashSet([]string{knownTRC20Address}),
 		contracts: stubContracts{contracts: []string{contract}}, httpClient: srv.Client(), sem: make(chan struct{}, 5),
 	}
 	if err := p.poll(context.Background()); err != nil {
@@ -442,7 +443,7 @@ func TestPoller_TRC20Broadcasted(t *testing.T) {
 	dbStub.scannedBlocks[contract] = 99
 	p := &Poller{
 		cfg: &config.Config{TronGridBaseURL: srv.URL, TronGridAPIKey: "test", RequiredConfs: 0, Trc20EventConfs: 0, Trc20CursorRetain: 0, Trc20EventRetries: 1},
-		db: dbStub, outbox: outbox, addresses: NewHashSet([]string{watchedSender}),
+		db:  dbStub, outbox: outbox, addresses: NewHashSet([]string{watchedSender}),
 		contracts: stubContracts{contracts: []string{contract}}, httpClient: srv.Client(), sem: make(chan struct{}, 5),
 	}
 	if err := p.poll(context.Background()); err != nil {
@@ -473,7 +474,7 @@ func TestPoller_TRXBroadcasted(t *testing.T) {
 	dbStub := newStubDB(99)
 	p := &Poller{
 		cfg: &config.Config{TronGridBaseURL: srv.URL, TronGridAPIKey: "test", RequiredConfs: 0},
-		db: dbStub, outbox: outbox, addresses: NewHashSet([]string{watchedTRXSender}),
+		db:  dbStub, outbox: outbox, addresses: NewHashSet([]string{watchedTRXSender}),
 		contracts: stubContracts{}, httpClient: srv.Client(), sem: make(chan struct{}, 5),
 	}
 	if err := p.poll(context.Background()); err != nil {
@@ -504,7 +505,7 @@ func TestPoller_TRXSelfTransferTwoEvents(t *testing.T) {
 	dbStub := newStubDB(99)
 	p := &Poller{
 		cfg: &config.Config{TronGridBaseURL: srv.URL, TronGridAPIKey: "test", RequiredConfs: 0},
-		db: dbStub, outbox: outbox, addresses: NewHashSet([]string{watchedTRXSelf}),
+		db:  dbStub, outbox: outbox, addresses: NewHashSet([]string{watchedTRXSelf}),
 		contracts: stubContracts{}, httpClient: srv.Client(), sem: make(chan struct{}, 5),
 	}
 	if err := p.poll(context.Background()); err != nil {
