@@ -68,6 +68,10 @@ func (s *stubDB) FailJob(_ context.Context, id string, _ error, _ time.Duration)
 	return nil
 }
 
+func (s *stubDB) IsWatchedAddressActive(_ context.Context, _ string) (bool, error) {
+	return true, nil
+}
+
 type stubOutbox struct {
 	mu     sync.Mutex
 	events []json.RawMessage

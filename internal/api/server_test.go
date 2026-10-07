@@ -601,7 +601,7 @@ func TestGetRetriesListsJobs(t *testing.T) {
 	}
 }
 
-func TestDeleteAddressDeactivatesAndReloads(t *testing.T) {
+func TestDeleteAddressDeactivates(t *testing.T) {
 	addr := "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
 	mem := &memDB{addresses: []internaldb.WatchedAddress{{
 		ID: "id-1", Address: addr, Status: "active", CreatedAt: time.Now(), UpdatedAt: time.Now(),

@@ -25,10 +25,6 @@ func (s *Server) handleDeleteAddress(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to deactivate address"})
 		return
 	}
-	if err := s.addresses.Reload(r.Context()); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to refresh address store"})
-		return
-	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":        row.ID,
 		"address":   row.Address,

@@ -118,6 +118,7 @@ type scannerDB interface {
 	ClaimBlockRangeJob(ctx context.Context, queue string, workerID string) (*internaldb.BlockRangeJob, error)
 	CompleteJob(ctx context.Context, id string) error
 	FailJob(ctx context.Context, id string, cause error, retryAfter time.Duration) error
+	IsWatchedAddressActive(ctx context.Context, address string) (bool, error)
 }
 
 type eventOutbox interface {
@@ -387,6 +388,7 @@ func (p *Poller) scanTrx(ctx context.Context, latestBlock int64) error {
 					fromAddr := hexToBase58(c.Parameter.Value.OwnerAddress)
 					amount := sunToTrx(c.Parameter.Value.Amount)
 					matched := p.matchedTransferEvents(
+						ctx,
 						"TRX", tx.TxID, fromAddr, toAddr, amount, "",
 						blockNum, block.BlockHeader.RawData.Timestamp,
 					)
@@ -541,6 +543,7 @@ func (p *Poller) scanTrc20(ctx context.Context, contract string, latestBlock int
 			toAddr := hexToBase58(e.Result.To)
 			fromAddr := hexToBase58(e.Result.From)
 			matched := p.matchedTransferEvents(
+				ctx,
 				"TRC20", e.TransactionID, fromAddr, toAddr, e.Result.Value, contract,
 				e.BlockNumber, e.BlockTimestamp,
 			)
@@ -696,6 +699,7 @@ func (p *Poller) replayTrxRange(ctx context.Context, fromBlock, toBlock int64) e
 				fromAddr := hexToBase58(c.Parameter.Value.OwnerAddress)
 				amount := sunToTrx(c.Parameter.Value.Amount)
 				matched := p.matchedTransferEvents(
+					ctx,
 					"TRX", tx.TxID, fromAddr, toAddr, amount, "",
 					blockNum, block.BlockHeader.RawData.Timestamp,
 				)
@@ -786,6 +790,7 @@ func (p *Poller) replayTrc20Range(ctx context.Context, contract string, fromBloc
 				"fromInWatchlist", fromMatched,
 			)
 			matched := p.matchedTransferEvents(
+				ctx,
 				"TRC20", e.TransactionID, fromAddr, toAddr, e.Result.Value, contract,
 				e.BlockNumber, e.BlockTimestamp,
 			)

@@ -82,6 +82,21 @@ func (c *Client) ListActiveAddresses(ctx context.Context) ([]string, error) {
 	return addrs, rows.Err()
 }
 
+// IsWatchedAddressActive reports whether address exists on the watchlist with status active.
+func (c *Client) IsWatchedAddressActive(ctx context.Context, address string) (bool, error) {
+	var status string
+	err := c.Pool.QueryRow(ctx, `
+		SELECT status FROM scanner_watched_addresses WHERE address = $1
+	`, address).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("IsWatchedAddressActive: %w", err)
+	}
+	return status == "active", nil
+}
+
 // ListAddresses returns watched addresses with optional status filter, exact search, and cursor pagination.
 func (c *Client) ListAddresses(ctx context.Context, status string, limit int, afterAddress, search string) ([]WatchedAddress, error) {
 	if limit <= 0 {
@@ -186,7 +201,8 @@ var (
 	ErrWatchedContractNotFound = errors.New("watched contract not found")
 )
 
-// DeactivateWatchedAddress marks an address inactive and notifies listeners.
+// DeactivateWatchedAddress marks an address inactive. The in-memory Bloom filter is not
+// rebuilt; scanner confirmation uses IsWatchedAddressActive before enqueueing webhooks.
 func (c *Client) DeactivateWatchedAddress(ctx context.Context, address string) (WatchedAddress, error) {
 	tx, err := c.Pool.Begin(ctx)
 	if err != nil {
@@ -202,9 +218,6 @@ func (c *Client) DeactivateWatchedAddress(ctx context.Context, address string) (
 		RETURNING id::text, address, status, source, created_at, updated_at
 	`, address).Scan(&row.ID, &row.Address, &row.Status, &row.Source, &row.CreatedAt, &row.UpdatedAt)
 	if err == nil {
-		if _, err := tx.Exec(ctx, `SELECT pg_notify($1, $2)`, NotifyAddressesChanged, `{"reason":"reload"}`); err != nil {
-			return WatchedAddress{}, fmt.Errorf("notify addresses: %w", err)
-		}
 		if err := tx.Commit(ctx); err != nil {
 			return WatchedAddress{}, err
 		}
