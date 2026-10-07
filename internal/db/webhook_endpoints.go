@@ -41,6 +41,23 @@ func (e *WebhookEndpoint) SigningSecrets() []string {
 	return out
 }
 
+func normalizeEndpointSigning(ep *WebhookEndpoint) error {
+	key, err := webhookspec.NormalizeSigningKey(ep.SigningSecret)
+	if err != nil {
+		return err
+	}
+	ep.SigningSecret = key
+	if ep.SigningSecretPrevious == "" {
+		return nil
+	}
+	prev, err := webhookspec.NormalizeSigningKey(ep.SigningSecretPrevious)
+	if err != nil {
+		return err
+	}
+	ep.SigningSecretPrevious = prev
+	return nil
+}
+
 // SubscribesTo reports whether the endpoint accepts the given event type.
 func (e *WebhookEndpoint) SubscribesTo(eventType string) bool {
 	if len(e.EventTypes) == 0 {
@@ -76,6 +93,9 @@ func (c *Client) ListWebhookEndpoints(ctx context.Context) ([]WebhookEndpoint, e
 		); err != nil {
 			return nil, fmt.Errorf("ListWebhookEndpoints scan: %w", err)
 		}
+		if err := normalizeEndpointSigning(&ep); err != nil {
+			return nil, fmt.Errorf("ListWebhookEndpoints signing key: %w", err)
+		}
 		out = append(out, ep)
 	}
 	return out, rows.Err()
@@ -99,6 +119,9 @@ func (c *Client) GetWebhookEndpoint(ctx context.Context, id string) (*WebhookEnd
 	if err != nil {
 		return nil, fmt.Errorf("GetWebhookEndpoint: %w", err)
 	}
+	if err := normalizeEndpointSigning(&ep); err != nil {
+		return nil, fmt.Errorf("GetWebhookEndpoint signing key: %w", err)
+	}
 	return &ep, nil
 }
 
@@ -108,8 +131,17 @@ func (c *Client) UpsertWebhookEndpoint(ctx context.Context, ep WebhookEndpoint) 
 	if err := policy.ValidateWebhookURL(ep.WebhookURL); err != nil {
 		return nil, err
 	}
-	if err := webhookspec.ValidateSigningKey(ep.SigningSecret); err != nil {
+	signingKey, err := webhookspec.NormalizeSigningKey(ep.SigningSecret)
+	if err != nil {
 		return nil, err
+	}
+	ep.SigningSecret = signingKey
+	if ep.SigningSecretPrevious != "" {
+		prev, err := webhookspec.NormalizeSigningKey(ep.SigningSecretPrevious)
+		if err != nil {
+			return nil, err
+		}
+		ep.SigningSecretPrevious = prev
 	}
 	types := ep.EventTypes
 	if len(types) == 0 {

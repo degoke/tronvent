@@ -23,6 +23,8 @@ type webhookDB interface {
 	MarkWebhookEventFailed(ctx context.Context, id string, attemptNumber int, responseCode *int, errMsg string, nextAttempt time.Time, maxAttempts int) error
 	RecordWebhookDeliveryAttempt(ctx context.Context, eventID string, attemptNumber int, reqHeaders, reqBody json.RawMessage, responseCode *int, responseBody, errMsg string, durationMs int) error
 	DeactivateWebhook(ctx context.Context, endpointID, reason string) error
+	GetWebhookEndpoint(ctx context.Context, endpointID string) (*internaldb.WebhookEndpoint, error)
+	ListWebhookEndpoints(ctx context.Context) ([]internaldb.WebhookEndpoint, error)
 }
 
 // Worker delivers webhook events from the Postgres outbox.
@@ -100,11 +102,9 @@ func (w *Worker) DispatchOnce(ctx context.Context) error {
 }
 
 func (w *Worker) deliverOne(ctx context.Context, ev internaldb.WebhookEvent) error {
-	var endpoint *internaldb.WebhookEndpoint
-	if ev.EndpointID != "" {
-		endpoint = w.config.GetEndpoint(ev.EndpointID)
-	} else {
-		endpoint = w.config.GetPrimaryEndpoint()
+	endpoint, err := w.resolveEndpoint(ctx, ev)
+	if err != nil {
+		return err
 	}
 	attemptNumber := ev.AttemptCount + 1
 
@@ -114,24 +114,21 @@ func (w *Worker) deliverOne(ctx context.Context, ev internaldb.WebhookEvent) err
 	}
 
 	if endpoint == nil || !endpoint.IsActive || endpoint.WebhookURL == "" {
-		next := webhookspec.NextAttemptTime(firstAttemptAt, attemptNumber, nil)
-		return w.db.MarkWebhookEventFailed(ctx, ev.ID, attemptNumber, nil, "webhook endpoint not active", next, w.maxAttempts)
+		return w.markEventDead(ctx, ev.ID, nil, "webhook endpoint not active")
 	}
 
 	if err := w.urlPolicy.ValidateWebhookURL(endpoint.WebhookURL); err != nil {
-		next := webhookspec.NextAttemptTime(firstAttemptAt, attemptNumber, nil)
-		return w.db.MarkWebhookEventFailed(ctx, ev.ID, attemptNumber, nil, err.Error(), next, w.maxAttempts)
+		return w.markEventDead(ctx, ev.ID, nil, err.Error())
 	}
 
 	body := ev.Payload
 	if err := webhookspec.ValidatePayloadSize(body); err != nil {
-		return w.db.MarkWebhookEventFailed(ctx, ev.ID, attemptNumber, nil, err.Error(), time.Now(), w.maxAttempts)
+		return w.markEventDead(ctx, ev.ID, nil, err.Error())
 	}
 	timestamp := time.Now().Unix()
 	headers, err := webhookspec.BuildHeaders(ev.ID, timestamp, body, endpoint.SigningSecrets())
 	if err != nil {
-		next := webhookspec.NextAttemptTime(firstAttemptAt, attemptNumber, nil)
-		return w.db.MarkWebhookEventFailed(ctx, ev.ID, attemptNumber, nil, err.Error(), next, w.maxAttempts)
+		return w.markEventDead(ctx, ev.ID, nil, err.Error())
 	}
 
 	start := time.Now()
@@ -162,12 +159,12 @@ func (w *Worker) deliverOne(ctx context.Context, ev internaldb.WebhookEvent) err
 
 	if outcome == webhookspec.OutcomeGone {
 		reason := "subscriber returned 410 Gone"
-		w.disableEndpointAndNotify(ctx, endpoint, ev.EndpointID, reason)
-		return w.db.MarkWebhookEventFailed(ctx, ev.ID, attemptNumber, respCodePtr, reason, time.Now(), w.maxAttempts)
+		w.disableEndpointAndNotify(ctx, endpoint, w.resolveEndpointID(ev, endpoint), reason)
+		return w.markEventDead(ctx, ev.ID, respCodePtr, reason)
 	}
 
 	if outcome == webhookspec.OutcomeFail {
-		return w.db.MarkWebhookEventFailed(ctx, ev.ID, attemptNumber, respCodePtr, errMsg, time.Now(), w.maxAttempts)
+		return w.markEventDead(ctx, ev.ID, respCodePtr, errMsg)
 	}
 
 	next := webhookspec.NextAttemptTime(firstAttemptAt, attemptNumber, resp)
@@ -182,9 +179,53 @@ func (w *Worker) deliverOne(ctx context.Context, ev internaldb.WebhookEvent) err
 	if attemptNumber >= w.maxAttempts {
 		reason := fmt.Sprintf("delivery failed after %d attempts", w.maxAttempts)
 		slog.Warn("webhook delivery exhausted retries", "eventId", ev.ID, "url", endpoint.WebhookURL)
-		w.disableEndpointAndNotify(ctx, endpoint, ev.EndpointID, reason)
+		w.disableEndpointAndNotify(ctx, endpoint, w.resolveEndpointID(ev, endpoint), reason)
 	}
 	return nil
+}
+
+func (w *Worker) markEventDead(ctx context.Context, eventID string, responseCode *int, errMsg string) error {
+	return w.db.MarkWebhookEventFailed(ctx, eventID, w.maxAttempts, responseCode, errMsg, time.Now(), w.maxAttempts)
+}
+
+func (w *Worker) resolveEndpoint(ctx context.Context, ev internaldb.WebhookEvent) (*internaldb.WebhookEndpoint, error) {
+	if ev.EndpointID != "" {
+		if ep := w.config.GetEndpoint(ev.EndpointID); ep != nil {
+			return ep, nil
+		}
+		ep, err := w.db.GetWebhookEndpoint(ctx, ev.EndpointID)
+		if err != nil {
+			return nil, err
+		}
+		if ep == nil {
+			return nil, nil
+		}
+		w.config.UpsertEndpoint(*ep)
+		return ep, nil
+	}
+	if ep := w.config.GetPrimaryEndpoint(); ep != nil {
+		return ep, nil
+	}
+	eps, err := w.db.ListWebhookEndpoints(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(eps) == 0 {
+		return nil, nil
+	}
+	ep := eps[0]
+	w.config.UpsertEndpoint(ep)
+	return &ep, nil
+}
+
+func (w *Worker) resolveEndpointID(ev internaldb.WebhookEvent, endpoint *internaldb.WebhookEndpoint) string {
+	if ev.EndpointID != "" {
+		return ev.EndpointID
+	}
+	if endpoint != nil {
+		return endpoint.ID
+	}
+	return ""
 }
 
 func (w *Worker) post(ctx context.Context, url string, body []byte, headers map[string]string) (int, string, *http.Response, error) {

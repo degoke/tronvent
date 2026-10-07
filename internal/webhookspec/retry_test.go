@@ -15,6 +15,9 @@ func TestClassifyDelivery(t *testing.T) {
 	if webhookspec.ClassifyDelivery(410, nil) != webhookspec.OutcomeGone {
 		t.Fatal("410 gone")
 	}
+	if webhookspec.ClassifyDelivery(404, nil) != webhookspec.OutcomeFail {
+		t.Fatal("expected 404 to fail without retry")
+	}
 	if webhookspec.ClassifyDelivery(302, nil) != webhookspec.OutcomeFail {
 		t.Fatal("3xx fail")
 	}

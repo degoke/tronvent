@@ -367,6 +367,22 @@ func TestPutWebhookUpdatesConfig(t *testing.T) {
 	}
 }
 
+func TestPostWebhookEndpointCreates(t *testing.T) {
+	mem := &memDB{}
+	srv := newTestServer(t, mem)
+	body, _ := json.Marshal(map[string]string{"webhookUrl": "https://example.com/hooks/1"})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhook/endpoints", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(mem.webhookEndpoints) != 1 {
+		t.Fatalf("expected one endpoint, got %d", len(mem.webhookEndpoints))
+	}
+}
+
 func TestGetWebhookEventsAPI(t *testing.T) {
 	mem := &memDB{webhookEvents: []internaldb.DashboardWebhookEvent{
 		{ID: "ev-failed", Status: "failed", TxHash: "tx-failed"},

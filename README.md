@@ -263,7 +263,7 @@ See `charts/tronvent/values.yaml` for all configurable values including resource
 make migrate
 ```
 
-Requires `DATABASE_URL`. Applies all pending files under `migrations/` (tracked in `schema_migrations`).
+Requires `DATABASE_URL`. Applies all pending files under `migrations/` (tracked in `schema_migrations`). Migration `002` wraps legacy plaintext signing secrets as `whsec_` (same key bytes) and rewrites outbox `dedupe_key` values to include `endpoint_id`.
 
 #### 2. Configure environment
 
@@ -368,7 +368,7 @@ Reference: [TRON network endpoints](https://developers.tron.network/docs/connect
 | Variable | Default | Description |
 |---|---|---|
 | `WEBHOOK_URL` | — | Bootstrap primary endpoint URL when `webhook_endpoints` is empty |
-| `WEBHOOK_SIGNING_SECRET` | — | Optional `whsec_` / `whsk_` key for bootstrap; ed25519 key pair generated if omitted |
+| `WEBHOOK_SIGNING_SECRET` | — | Optional `whsec_` / `whsk_` key for bootstrap (legacy plaintext is auto-wrapped to `whsec_` if ≥24 bytes); ed25519 key pair generated if omitted |
 | `WEBHOOK_MAX_ATTEMPTS` | `10` | Delivery attempts per outbox event before status `dead` (max **10**, Standard Webhooks schedule) |
 | `WEBHOOK_POLL_INTERVAL_MS` | `1000` | Outbox poll interval |
 | `WEBHOOK_HTTP_TIMEOUT_SECONDS` | `30` | Delivery HTTP timeout |
@@ -473,7 +473,8 @@ Tronvent implements the Standard Webhooks producer guidelines:
 
 - **HTTPS-only** subscriber URLs (private/link-local/metadata hosts blocked at config and connect time).
 - **No redirect following** — `3xx` responses are terminal failures.
-- **Retries** — up to **`WEBHOOK_MAX_ATTEMPTS`** per outbox row (default **10**, hard-capped at the spec table). Spacing follows the [Standard Webhooks retry schedule](https://www.standardwebhooks.com) (~75h total, with jitter). `429`, `5xx`, `502`, and `504` are retried; `Retry-After` is honored when present. After the last failed attempt the event is marked **`dead`** in the outbox (it is not delivered further until you call the retry API).
+- **Retries** — up to **`WEBHOOK_MAX_ATTEMPTS`** per outbox row (default **10**, hard-capped at the spec table). Spacing follows the [Standard Webhooks retry schedule](https://www.standardwebhooks.com) (~75h total, with jitter). `429`, `5xx`, `502`, and `504` are retried; `Retry-After` is honored when present. After the last failed attempt the event is marked **`dead`** in the outbox (it is not delivered further until you call the retry API). Other **4xx** and **3xx** responses mark the event **`dead`** immediately (no endpoint disable). Invalid subscriber URL, signing configuration, oversize payload, or inactive endpoint also mark the event **`dead`** (fix config and use retry API).
+- **Stuck deliveries** — rows left in `delivering` after a worker crash are reclaimed after **5 minutes** (`attempt_count` is incremented on reclaim).
 - **Endpoint auto-disable** — the **subscriber endpoint** (`webhook_endpoints.is_active`) is set to `false` when:
   - the subscriber returns **`410 Gone`** (immediate), or
   - a delivery exhausts **`WEBHOOK_MAX_ATTEMPTS`** retryable failures for that event (chronic failure).

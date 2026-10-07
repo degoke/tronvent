@@ -48,6 +48,14 @@ func (w *workerDB) DeactivateWebhook(_ context.Context, _ string, _ string) erro
 	return nil
 }
 
+func (w *workerDB) GetWebhookEndpoint(_ context.Context, _ string) (*internaldb.WebhookEndpoint, error) {
+	return nil, nil
+}
+
+func (w *workerDB) ListWebhookEndpoints(_ context.Context) ([]internaldb.WebhookEndpoint, error) {
+	return nil, nil
+}
+
 func testSigningSecret(t *testing.T) string {
 	secret, _, err := webhookspec.GenerateSigningKeyPair()
 	if err != nil {
@@ -164,6 +172,14 @@ func (r *retryDB) RecordWebhookDeliveryAttempt(_ context.Context, eventID string
 
 func (r *retryDB) DeactivateWebhook(_ context.Context, _ string, _ string) error {
 	return nil
+}
+
+func (r *retryDB) GetWebhookEndpoint(_ context.Context, _ string) (*internaldb.WebhookEndpoint, error) {
+	return nil, nil
+}
+
+func (r *retryDB) ListWebhookEndpoints(_ context.Context) ([]internaldb.WebhookEndpoint, error) {
+	return nil, nil
 }
 
 func TestWorkerManualRetryAfterMaximumUsesNextAttemptOnce(t *testing.T) {

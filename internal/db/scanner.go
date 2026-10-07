@@ -521,6 +521,12 @@ func (c *Client) EnqueueWebhookEvent(ctx context.Context, eventType, scope, txHa
 	}
 	stdType := webhookpayload.TransactionType(eventType)
 
+	tx, err := c.Pool.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
 	var firstID string
 	enqueued := 0
 	for _, ep := range endpoints {
@@ -532,23 +538,23 @@ func (c *Client) EnqueueWebhookEvent(ctx context.Context, eventType, scope, txHa
 		if payload != nil {
 			raw, err := json.Marshal(payload)
 			if err != nil {
-				return firstID, fmt.Errorf("marshal payload: %w", err)
+				return "", fmt.Errorf("marshal payload: %w", err)
 			}
 			if err := json.Unmarshal(raw, &payloadMap); err != nil {
-				return firstID, fmt.Errorf("unmarshal payload: %w", err)
+				return "", fmt.Errorf("unmarshal payload: %w", err)
 			}
 		}
 		dataObj, ok := payloadMap["data"].(map[string]any)
 		if !ok {
-			return firstID, fmt.Errorf("webhook payload must include a data object")
+			return "", fmt.Errorf("webhook payload must include a data object")
 		}
 		dataObj["id"] = id
 		data, err := json.Marshal(payloadMap)
 		if err != nil {
-			return firstID, fmt.Errorf("marshal payload with id: %w", err)
+			return "", fmt.Errorf("marshal payload with id: %w", err)
 		}
 		if err := webhookspec.ValidatePayloadSize(data); err != nil {
-			return firstID, err
+			return "", err
 		}
 		var endpointID any
 		dedupeKey := fmt.Sprintf("%s:%s", scope, txHash)
@@ -556,14 +562,14 @@ func (c *Client) EnqueueWebhookEvent(ctx context.Context, eventType, scope, txHa
 			endpointID = ep.ID
 			dedupeKey = fmt.Sprintf("%s:%s:%s", scope, txHash, ep.ID)
 		}
-		tag, err := c.Pool.Exec(ctx, `
+		tag, err := tx.Exec(ctx, `
 			INSERT INTO webhook_events (
 				id, event_type, scope, tx_hash, block_number, block_timestamp, payload, dedupe_key, endpoint_id
 			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			ON CONFLICT (dedupe_key) DO NOTHING
 		`, id, eventType, scope, txHash, blockNumber, blockTimestamp, data, dedupeKey, endpointID)
 		if err != nil {
-			return firstID, fmt.Errorf("EnqueueWebhookEvent: %w", err)
+			return "", fmt.Errorf("EnqueueWebhookEvent: %w", err)
 		}
 		if tag.RowsAffected() == 0 {
 			continue
@@ -574,7 +580,13 @@ func (c *Client) EnqueueWebhookEvent(ctx context.Context, eventType, scope, txHa
 		}
 	}
 	if enqueued == 0 {
+		if err := tx.Commit(ctx); err != nil {
+			return "", err
+		}
 		return "", nil
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
 	}
 	return firstID, nil
 }
@@ -585,12 +597,24 @@ func (c *Client) ClaimPendingWebhookEvents(ctx context.Context, limit int) ([]We
 		limit = 10
 	}
 	rows, err := c.Pool.Query(ctx, `
-		UPDATE webhook_events
-		SET status = 'delivering', updated_at = now()
-		WHERE id IN (
+		UPDATE webhook_events AS w
+		SET status = 'delivering',
+		    updated_at = now(),
+		    attempt_count = CASE
+		      WHEN w.status = 'delivering' AND w.updated_at < now() - interval '5 minutes'
+		      THEN w.attempt_count + 1
+		      ELSE w.attempt_count
+		    END
+		WHERE w.id IN (
 			SELECT id FROM webhook_events
-			WHERE status IN ('pending', 'failed')
-			  AND next_attempt_at <= now()
+			WHERE (
+			    status IN ('pending', 'failed')
+			    AND next_attempt_at <= now()
+			  )
+			  OR (
+			    status = 'delivering'
+			    AND updated_at < now() - interval '5 minutes'
+			  )
 			ORDER BY next_attempt_at ASC, created_at ASC
 			LIMIT $1
 			FOR UPDATE SKIP LOCKED
