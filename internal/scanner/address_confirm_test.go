@@ -8,10 +8,10 @@ import (
 )
 
 type batchConfirmDB struct {
-	active   map[string]bool
-	batch    int
-	single   int
-	batchErr error
+	active    map[string]bool
+	batch     int
+	single    int
+	batchErr  error
 	singleErr error
 }
 
