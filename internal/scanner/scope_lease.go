@@ -10,7 +10,7 @@ import (
 	"os"
 	"time"
 
-	internaldb 	"github.com/degoke/tronvent/internal/db"
+	internaldb "github.com/degoke/tronvent/internal/db"
 	"github.com/degoke/tronvent/internal/metrics"
 )
 

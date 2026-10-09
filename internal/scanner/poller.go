@@ -141,16 +141,16 @@ type contractLister interface {
 
 // Poller polls TronGrid for new blocks and enqueues matched events to the Postgres outbox.
 type Poller struct {
-	cfg        *config.Config
-	db         scannerDB
-	outbox     eventOutbox
-	addresses  AddressSet
-	contracts  contractLister
-	httpClient *http.Client
-	sem           chan struct{}
-	keys          *tronGridAPIKeyPool
-	scanWorkerID      string
-	forwardScanReady  atomic.Bool
+	cfg              *config.Config
+	db               scannerDB
+	outbox           eventOutbox
+	addresses        AddressSet
+	contracts        contractLister
+	httpClient       *http.Client
+	sem              chan struct{}
+	keys             *tronGridAPIKeyPool
+	scanWorkerID     string
+	forwardScanReady atomic.Bool
 }
 
 // NewPoller creates a Poller wired to Postgres cursors and the webhook outbox.
@@ -168,12 +168,12 @@ func NewPoller(
 	keys := newTronGridAPIKeyPool(cfg.TronGridAPIKey)
 	slog.Info("poller configured", "fetchConcurrency", concurrency, "tronGridApiKeys", keys.count())
 	return &Poller{
-		cfg:        cfg,
-		db:         db,
-		outbox:     outbox,
-		addresses:  addresses,
-		contracts:  contracts,
-		httpClient: &http.Client{Timeout: time.Duration(cfg.HTTPTimeoutSeconds) * time.Second},
+		cfg:          cfg,
+		db:           db,
+		outbox:       outbox,
+		addresses:    addresses,
+		contracts:    contracts,
+		httpClient:   &http.Client{Timeout: time.Duration(cfg.HTTPTimeoutSeconds) * time.Second},
 		sem:          make(chan struct{}, concurrency),
 		keys:         keys,
 		scanWorkerID: NewScannerWorkerID(),
