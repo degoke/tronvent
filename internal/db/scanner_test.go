@@ -3,6 +3,7 @@ package db_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -35,7 +36,7 @@ func TestScannerRepositoryIntegration(t *testing.T) {
 		t.Fatalf("unexpected row: %+v", row)
 	}
 
-	if err := client.SetScannedBlock(ctx, "TRX", 12345); err != nil {
+	if err := client.SetScannedBlock(ctx, "TRX", 12345, ""); err != nil {
 		t.Fatal(err)
 	}
 	block, err := client.GetScannedBlock(ctx, "TRX")
@@ -303,5 +304,206 @@ func TestUpsertWebhookEndpointRejectsLegacyEventTypes(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected legacy event type rejection")
+	}
+}
+
+func TestScannerScopeLease(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+
+	ctx := context.Background()
+	client, err := internaldb.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	scope := "lease-test-" + fmt.Sprintf("%d", time.Now().UnixNano())
+	lease := 30 * time.Second
+
+	_, claimed, err := client.TryClaimScannerScope(ctx, scope, "worker-a", lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !claimed {
+		t.Fatal("worker-a should claim new scope")
+	}
+	if err := client.SetScannedBlock(ctx, scope, 42, "worker-a"); err != nil {
+		t.Fatal(err)
+	}
+
+	_, claimed, err = client.TryClaimScannerScope(ctx, scope, "worker-b", lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed {
+		t.Fatal("worker-b should not claim while worker-a holds lease")
+	}
+
+	block, err := client.GetScannedBlock(ctx, scope)
+	if err != nil || block != 42 {
+		t.Fatalf("cursor = %d err=%v", block, err)
+	}
+
+	if _, err := client.ReleaseScannerScope(ctx, scope, "worker-a"); err != nil {
+		t.Fatal(err)
+	}
+
+	highest, claimed, err := client.TryClaimScannerScope(ctx, scope, "worker-b", lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !claimed || highest != 42 {
+		t.Fatalf("worker-b claim: claimed=%v highest=%d", claimed, highest)
+	}
+	if _, err := client.ReleaseScannerScope(ctx, scope, "worker-b"); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _ = client.Pool.Exec(ctx, `DELETE FROM scanner_cursors WHERE scope = $1`, scope)
+}
+
+func TestScannerScopeLeaseRenew(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+
+	ctx := context.Background()
+	client, err := internaldb.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	scope := "lease-renew-" + fmt.Sprintf("%d", time.Now().UnixNano())
+	lease := 30 * time.Second
+
+	_, claimed, err := client.TryClaimScannerScope(ctx, scope, "worker-a", lease)
+	if err != nil || !claimed {
+		t.Fatalf("claim: claimed=%v err=%v", claimed, err)
+	}
+	if err := client.RenewScannerScopeLease(ctx, scope, "worker-a", lease); err != nil {
+		t.Fatal(err)
+	}
+	_, claimed, err = client.TryClaimScannerScope(ctx, scope, "worker-b", lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed {
+		t.Fatal("worker-b should not take lease while worker-a holds it after renew")
+	}
+	if _, err := client.ReleaseScannerScope(ctx, scope, "worker-a"); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = client.Pool.Exec(ctx, `DELETE FROM scanner_cursors WHERE scope = $1`, scope)
+}
+
+func TestScannerScopeLeaseExpiry(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+
+	ctx := context.Background()
+	client, err := internaldb.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	scope := "lease-expiry-" + fmt.Sprintf("%d", time.Now().UnixNano())
+	shortLease := 2 * time.Second
+
+	_, claimed, err := client.TryClaimScannerScope(ctx, scope, "worker-a", shortLease)
+	if err != nil || !claimed {
+		t.Fatalf("claim: claimed=%v err=%v", claimed, err)
+	}
+	time.Sleep(3 * time.Second)
+
+	_, claimed, err = client.TryClaimScannerScope(ctx, scope, "worker-b", shortLease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !claimed {
+		t.Fatal("worker-b should claim after worker-a lease expired")
+	}
+	if _, err := client.ReleaseScannerScope(ctx, scope, "worker-b"); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = client.Pool.Exec(ctx, `DELETE FROM scanner_cursors WHERE scope = $1`, scope)
+}
+
+func TestScannerCursorLeasesEnabled(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+
+	ctx := context.Background()
+	client, err := internaldb.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	ok, err := client.ScannerCursorLeasesEnabled(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected migration 006 lease columns")
+	}
+}
+
+func TestSetScannedBlockLeaseConflict(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+
+	ctx := context.Background()
+	client, err := internaldb.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	scope := "lease-conflict-" + fmt.Sprintf("%d", time.Now().UnixNano())
+	lease := 30 * time.Second
+
+	_, claimed, err := client.TryClaimScannerScope(ctx, scope, "worker-a", lease)
+	if err != nil || !claimed {
+		t.Fatalf("claim worker-a: claimed=%v err=%v", claimed, err)
+	}
+	if err := client.SetScannedBlock(ctx, scope, 10, "worker-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.SetScannedBlock(ctx, scope, 11, "worker-b"); !errors.Is(err, internaldb.ErrCursorLeaseConflict) {
+		t.Fatalf("expected lease conflict, got %v", err)
+	}
+	if _, err := client.ReleaseScannerScope(ctx, scope, "worker-a"); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = client.Pool.Exec(ctx, `DELETE FROM scanner_cursors WHERE scope = $1`, scope)
+}
+
+func TestRequireScannerCursorLeases(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+
+	ctx := context.Background()
+	client, err := internaldb.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	if err := client.RequireScannerCursorLeases(ctx); err != nil {
+		t.Fatal(err)
 	}
 }

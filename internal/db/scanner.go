@@ -502,19 +502,175 @@ func (c *Client) GetScannedBlock(ctx context.Context, scope string) (int64, erro
 	return highest, nil
 }
 
-// SetScannedBlock upserts the cursor for a scope.
-func (c *Client) SetScannedBlock(ctx context.Context, scope string, blockNum int64) error {
-	_, err := c.Pool.Exec(ctx, `
-		INSERT INTO scanner_cursors (scope, highest_block, updated_at)
-		VALUES ($1, $2, now())
-		ON CONFLICT (scope) DO UPDATE
-		SET highest_block = GREATEST(scanner_cursors.highest_block, EXCLUDED.highest_block),
-		    updated_at = now()
-	`, scope, blockNum)
+// ScannerScopeLeaseDuration is how long a replica may hold a scope before another may take over.
+// Renewed during each scan batch; keep comfortably above worst-case TronGrid batch latency.
+const ScannerScopeLeaseDuration = 10 * time.Minute
+
+// ErrScannerCursorLeasesRequired is returned when migration 006 has not been applied.
+var ErrScannerCursorLeasesRequired = errors.New("scanner cursor lease columns required")
+
+// ErrCursorLeaseConflict is returned when SetScannedBlock is called without holding the active lease.
+var ErrCursorLeaseConflict = errors.New("scanner cursor update blocked by another scope lease holder")
+
+// ScannerCursorLeasesEnabled reports whether migration 006 lease columns exist.
+func (c *Client) ScannerCursorLeasesEnabled(ctx context.Context) (bool, error) {
+	var ok bool
+	err := c.Pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.columns
+			WHERE table_schema = 'public'
+			  AND table_name = 'scanner_cursors'
+			  AND column_name = 'locked_by'
+		)
+	`).Scan(&ok)
 	if err != nil {
-		return fmt.Errorf("SetScannedBlock(%s): %w", scope, err)
+		return false, fmt.Errorf("ScannerCursorLeasesEnabled: %w", err)
+	}
+	return ok, nil
+}
+
+// RequireScannerCursorLeases returns an error when migration 006 is not applied.
+func (c *Client) RequireScannerCursorLeases(ctx context.Context) error {
+	ok, err := c.ScannerCursorLeasesEnabled(ctx)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("%w: apply migrations/006_scanner_cursor_scope_lease.up.sql", ErrScannerCursorLeasesRequired)
 	}
 	return nil
+}
+
+// TryClaimScannerScope grants an exclusive forward-scan lease for scope to workerID.
+// Returns (highestBlock, claimed, err). claimed is false when another replica holds a valid lease.
+func (c *Client) TryClaimScannerScope(ctx context.Context, scope, workerID string, lease time.Duration) (int64, bool, error) {
+	if lease <= 0 {
+		lease = ScannerScopeLeaseDuration
+	}
+	leaseSec := int(lease.Seconds())
+	if leaseSec < 1 {
+		leaseSec = 1
+	}
+	var highest int64
+	err := c.Pool.QueryRow(ctx, `
+		INSERT INTO scanner_cursors (scope, highest_block, locked_by, locked_until, updated_at)
+		VALUES ($1, 0, $2, now() + ($3::bigint * interval '1 second'), now())
+		ON CONFLICT (scope) DO UPDATE
+		SET locked_by = EXCLUDED.locked_by,
+		    locked_until = EXCLUDED.locked_until,
+		    updated_at = now()
+		WHERE scanner_cursors.locked_until IS NULL
+		   OR scanner_cursors.locked_until < now()
+		   OR scanner_cursors.locked_by = EXCLUDED.locked_by
+		RETURNING highest_block
+	`, scope, workerID, leaseSec).Scan(&highest)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("TryClaimScannerScope(%s): %w", scope, err)
+	}
+	return highest, true, nil
+}
+
+// RenewScannerScopeLease extends the lease for workerID while a long scan is in progress.
+func (c *Client) RenewScannerScopeLease(ctx context.Context, scope, workerID string, lease time.Duration) error {
+	if lease <= 0 {
+		lease = ScannerScopeLeaseDuration
+	}
+	leaseSec := int(lease.Seconds())
+	if leaseSec < 1 {
+		leaseSec = 1
+	}
+	tag, err := c.Pool.Exec(ctx, `
+		UPDATE scanner_cursors
+		SET locked_until = now() + ($3::bigint * interval '1 second'),
+		    updated_at = now()
+		WHERE scope = $1 AND locked_by = $2
+	`, scope, workerID, leaseSec)
+	if err != nil {
+		return fmt.Errorf("RenewScannerScopeLease(%s): %w", scope, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("RenewScannerScopeLease(%s): lease not held by %s", scope, workerID)
+	}
+	return nil
+}
+
+// ReleaseScannerScope drops the forward-scan lease when workerID holds it.
+// released is false when no row matched (lease already expired or owned by another worker).
+func (c *Client) ReleaseScannerScope(ctx context.Context, scope, workerID string) (bool, error) {
+	tag, err := c.Pool.Exec(ctx, `
+		UPDATE scanner_cursors
+		SET locked_by = NULL, locked_until = NULL, updated_at = now()
+		WHERE scope = $1 AND locked_by = $2
+	`, scope, workerID)
+	if err != nil {
+		return false, fmt.Errorf("ReleaseScannerScope(%s): %w", scope, err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// SetScannedBlock upserts the cursor for a scope.
+// When leaseHolder is non-empty, the scope must not be actively leased to a different worker.
+func (c *Client) SetScannedBlock(ctx context.Context, scope string, blockNum int64, leaseHolder string) error {
+	tx, err := c.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var highest int64
+	var lockedBy *string
+	var lockedUntil *time.Time
+	err = tx.QueryRow(ctx, `
+		SELECT highest_block, locked_by, locked_until
+		FROM scanner_cursors
+		WHERE scope = $1
+		FOR UPDATE
+	`, scope).Scan(&highest, &lockedBy, &lockedUntil)
+	if errors.Is(err, pgx.ErrNoRows) {
+		_, err = tx.Exec(ctx, `
+			INSERT INTO scanner_cursors (scope, highest_block, updated_at)
+			VALUES ($1, $2, now())
+		`, scope, blockNum)
+		if err != nil {
+			return fmt.Errorf("SetScannedBlock(%s) insert: %w", scope, err)
+		}
+		return tx.Commit(ctx)
+	}
+	if err != nil {
+		return fmt.Errorf("SetScannedBlock(%s) lock: %w", scope, err)
+	}
+	if leaseHolder != "" && activeScannerLease(lockedBy, lockedUntil) && *lockedBy != leaseHolder {
+		return ErrCursorLeaseConflict
+	}
+	newHighest := blockNum
+	if highest > newHighest {
+		newHighest = highest
+	}
+	_, err = tx.Exec(ctx, `
+		UPDATE scanner_cursors
+		SET highest_block = $2, updated_at = now()
+		WHERE scope = $1
+	`, scope, newHighest)
+	if err != nil {
+		return fmt.Errorf("SetScannedBlock(%s) update: %w", scope, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("SetScannedBlock(%s) commit: %w", scope, err)
+	}
+	return nil
+}
+
+func activeScannerLease(lockedBy *string, lockedUntil *time.Time) bool {
+	if lockedBy == nil || *lockedBy == "" {
+		return false
+	}
+	if lockedUntil == nil {
+		return true
+	}
+	return lockedUntil.After(time.Now())
 }
 
 // ListCursors returns all scanner cursors.

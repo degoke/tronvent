@@ -22,6 +22,7 @@ type stubDB struct {
 	completed     []string
 	failed        []string
 	activeAddrs   map[string]bool // nil → all addresses active
+	scopeClaimOK  map[string]bool // if set, scope → whether TryClaim succeeds
 }
 
 func newStubDB(initialBlock int64) *stubDB {
@@ -36,11 +37,38 @@ func (s *stubDB) GetScannedBlock(_ context.Context, scope string) (int64, error)
 	return s.scannedBlocks[scope], nil
 }
 
-func (s *stubDB) SetScannedBlock(_ context.Context, scope string, blockNum int64) error {
+func (s *stubDB) SetScannedBlock(_ context.Context, scope string, blockNum int64, _ string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if cur := s.scannedBlocks[scope]; blockNum < cur {
+		blockNum = cur
+	}
 	s.scannedBlocks[scope] = blockNum
 	return nil
+}
+
+func (s *stubDB) RequireScannerCursorLeases(context.Context) error {
+	return nil
+}
+
+func (s *stubDB) TryClaimScannerScope(_ context.Context, scope, _ string, _ time.Duration) (int64, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.scopeClaimOK != nil {
+		ok, exists := s.scopeClaimOK[scope]
+		if exists && !ok {
+			return s.scannedBlocks[scope], false, nil
+		}
+	}
+	return s.scannedBlocks[scope], true, nil
+}
+
+func (s *stubDB) RenewScannerScopeLease(context.Context, string, string, time.Duration) error {
+	return nil
+}
+
+func (s *stubDB) ReleaseScannerScope(context.Context, string, string) (bool, error) {
+	return true, nil
 }
 
 func (s *stubDB) ClaimBlockRangeJobs(_ context.Context, _ string, _ string, _ int) ([]internaldb.BlockRangeJob, error) {
