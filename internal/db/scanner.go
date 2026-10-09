@@ -554,7 +554,7 @@ func (c *Client) TryClaimScannerScope(ctx context.Context, scope, workerID strin
 	var highest int64
 	err := c.Pool.QueryRow(ctx, `
 		INSERT INTO scanner_cursors (scope, highest_block, locked_by, locked_until, updated_at)
-		VALUES ($1, 0, $2, now() + ($3::text || ' seconds')::interval, now())
+		VALUES ($1, 0, $2, now() + ($3::bigint * interval '1 second'), now())
 		ON CONFLICT (scope) DO UPDATE
 		SET locked_by = EXCLUDED.locked_by,
 		    locked_until = EXCLUDED.locked_until,
@@ -584,7 +584,7 @@ func (c *Client) RenewScannerScopeLease(ctx context.Context, scope, workerID str
 	}
 	tag, err := c.Pool.Exec(ctx, `
 		UPDATE scanner_cursors
-		SET locked_until = now() + ($3::text || ' seconds')::interval,
+		SET locked_until = now() + ($3::bigint * interval '1 second'),
 		    updated_at = now()
 		WHERE scope = $1 AND locked_by = $2
 	`, scope, workerID, leaseSec)
