@@ -15,6 +15,26 @@ import (
 // ErrWebhookEndpointNotFound is returned when a webhook endpoint id does not exist.
 var ErrWebhookEndpointNotFound = errors.New("webhook endpoint not found")
 
+// ErrInvalidWebhookEndpoint marks caller-supplied endpoint fields (URL, signing key,
+// event types) that fail validation, so handlers can answer 400 rather than 500.
+var ErrInvalidWebhookEndpoint = errors.New("invalid webhook endpoint")
+
+// ErrWebhookEndpointHasUndeliveredEvents is returned by DeleteWebhookEndpoint (without
+// force) while the endpoint still has pending, delivering or failed outbox events.
+var ErrWebhookEndpointHasUndeliveredEvents = errors.New("webhook endpoint has undelivered events")
+
+// invalidEndpointError keeps the underlying message (no prefix) while matching
+// errors.Is(err, ErrInvalidWebhookEndpoint).
+type invalidEndpointError struct{ err error }
+
+func (e invalidEndpointError) Error() string        { return e.err.Error() }
+func (e invalidEndpointError) Unwrap() error        { return e.err }
+func (e invalidEndpointError) Is(target error) bool { return target == ErrInvalidWebhookEndpoint }
+
+func invalidWebhookEndpoint(err error) error {
+	return invalidEndpointError{err: err}
+}
+
 // WebhookEndpoint is a subscriber destination for webhook fanout.
 type WebhookEndpoint struct {
 	ID                    string
@@ -121,11 +141,14 @@ func (c *Client) GetWebhookEndpoint(ctx context.Context, id string) (*WebhookEnd
 func (c *Client) UpsertWebhookEndpoint(ctx context.Context, ep WebhookEndpoint) (*WebhookEndpoint, error) {
 	policy := webhookspec.URLPolicy{}
 	if err := policy.ValidateWebhookURL(ep.WebhookURL); err != nil {
-		return nil, err
+		if errors.Is(err, webhookspec.ErrHostLookup) {
+			return nil, err // transient resolver failure, not a problem with the input
+		}
+		return nil, invalidWebhookEndpoint(err)
 	}
 	signingKey, err := webhookspec.NormalizeSigningKey(ep.SigningSecret)
 	if err != nil {
-		return nil, err
+		return nil, invalidWebhookEndpoint(err)
 	}
 	ep.SigningSecret = signingKey
 	if ep.SigningSecretPrevious != "" {
@@ -137,7 +160,7 @@ func (c *Client) UpsertWebhookEndpoint(ctx context.Context, ep WebhookEndpoint) 
 	}
 	if len(ep.EventTypes) > 0 {
 		if err := webhookpayload.ValidateEventTypes(ep.EventTypes); err != nil {
-			return nil, err
+			return nil, invalidWebhookEndpoint(err)
 		}
 	}
 	types := ep.EventTypes
@@ -239,19 +262,41 @@ func (c *Client) DeactivateWebhookEndpoint(ctx context.Context, endpointID, reas
 	return tx.Commit(ctx)
 }
 
-// DeleteWebhookEndpoint removes a subscriber endpoint.
-func (c *Client) DeleteWebhookEndpoint(ctx context.Context, endpointID string) error {
+// DeleteWebhookEndpoint removes a subscriber endpoint along with its outbox rows and
+// delivery attempts (ON DELETE CASCADE, migration 002). Unless force is set it refuses
+// with ErrWebhookEndpointHasUndeliveredEvents while pending, delivering or failed
+// events remain, since deleting would discard them for good.
+func (c *Client) DeleteWebhookEndpoint(ctx context.Context, endpointID string, force bool) error {
 	tx, err := c.Pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	tag, err := tx.Exec(ctx, `DELETE FROM webhook_endpoints WHERE id = $1`, endpointID)
-	if err != nil {
+	// Lock the row so the check below cannot race EnqueueWebhookEvent, which holds
+	// FOR KEY SHARE on it until its transaction commits.
+	var id string
+	if err := tx.QueryRow(ctx, `SELECT id::text FROM webhook_endpoints WHERE id = $1 FOR UPDATE`, endpointID).Scan(&id); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrWebhookEndpointNotFound
+		}
 		return fmt.Errorf("DeleteWebhookEndpoint: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return ErrWebhookEndpointNotFound
+	if !force {
+		var undelivered bool
+		if err := tx.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM webhook_events
+				WHERE endpoint_id = $1 AND status IN ('pending', 'delivering', 'failed')
+			)
+		`, endpointID).Scan(&undelivered); err != nil {
+			return fmt.Errorf("DeleteWebhookEndpoint: %w", err)
+		}
+		if undelivered {
+			return ErrWebhookEndpointHasUndeliveredEvents
+		}
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM webhook_endpoints WHERE id = $1`, endpointID); err != nil {
+		return fmt.Errorf("DeleteWebhookEndpoint: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `SELECT pg_notify($1, $2)`, NotifyWebhookChanged, `{"reason":"reload"}`); err != nil {
 		return fmt.Errorf("notify webhook endpoint delete: %w", err)
@@ -276,7 +321,7 @@ func (c *Client) BootstrapWebhookEndpoints(ctx context.Context, webhookURL, sign
 func (c *Client) UpsertPrimaryWebhookEndpointPreserveSecret(ctx context.Context, webhookURL, signingSecret string, isActive bool, source string, eventTypes []string) (*WebhookEndpoint, error) {
 	webhookURL = strings.TrimSpace(webhookURL)
 	if webhookURL == "" {
-		return nil, fmt.Errorf("webhook URL is required")
+		return nil, invalidWebhookEndpoint(errors.New("webhook URL is required"))
 	}
 	eps, err := c.ListWebhookEndpoints(ctx)
 	if err != nil {

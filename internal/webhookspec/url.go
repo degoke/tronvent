@@ -1,12 +1,20 @@
 package webhookspec
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
 	"net/url"
 	"strings"
 )
+
+// ErrHostLookup marks a DNS failure that does not prove the URL is bad (timeout,
+// resolver outage), so callers can retry instead of reporting a client error.
+var ErrHostLookup = errors.New("webhook URL host lookup failed")
+
+// lookupIP is net.LookupIP, replaced in tests.
+var lookupIP = net.LookupIP
 
 // URLPolicy validates subscriber webhook URLs before delivery or persistence.
 type URLPolicy struct {
@@ -47,9 +55,14 @@ func rejectPrivateHost(host string) error {
 	if ip, err := netip.ParseAddr(host); err == nil {
 		return rejectPrivateAddr(ip)
 	}
-	ips, err := net.LookupIP(host)
+	ips, err := lookupIP(host)
 	if err != nil {
-		return fmt.Errorf("webhook URL host lookup failed: %w", err)
+		var dnsErr *net.DNSError
+		if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
+			return fmt.Errorf("webhook URL host %q does not resolve", host)
+		}
+		// The raw error names the resolver (e.g. "lookup h on 10.0.0.2:53: ..."); keep it out of the message.
+		return fmt.Errorf("%w for %q", ErrHostLookup, host)
 	}
 	if len(ips) == 0 {
 		return fmt.Errorf("webhook URL host has no addresses")

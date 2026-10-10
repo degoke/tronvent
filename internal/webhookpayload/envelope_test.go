@@ -43,8 +43,9 @@ func TestNewDirectedTransactionEnvelope(t *testing.T) {
 	if env.Type != webhookpayload.TypeTransactionTRXReceived {
 		t.Fatalf("type: %q", env.Type)
 	}
-	if env.Timestamp == "" {
-		t.Fatal("missing timestamp")
+	// Block time has millisecond resolution; RFC 3339 output drops a zero fraction.
+	if env.Timestamp != "2024-06-24T13:09:27Z" {
+		t.Fatalf("timestamp: %q", env.Timestamp)
 	}
 	if env.Data.TxHash != "abc" {
 		t.Fatal("data")

@@ -83,13 +83,13 @@ TRX and each TRC-20 contract scan **concurrently** with independent cursors, so 
 
 Every watched address is held in an in-memory **Bloom filter** — a probabilistic data structure that answers “is this address probably in my set?” in O(1) time with minimal memory.
 
-Tronvent tunes the filter for **1 million addresses at a 0.1% false-positive rate** (~14 MB of bit storage, 10 hash functions). Properties:
+Tronvent tunes the filter for **1 million addresses at a 0.1% false-positive rate** (14,377,588 bits ≈ **1.8 MB**, 10 hash functions). Properties:
 
 | Property | Behavior |
 |---|---|
 | **No false negatives** | A real watched address is *never* missed while it remains in the Bloom filter. |
 | **Rare false positives** | ~1 in 1,000 non-watched addresses may pass the filter. Before a webhook is enqueued, the poller confirms the address is **actively** watched in Postgres (batch lookup per scan batch). False positives and deactivated rows do not produce webhooks. |
-| **Memory efficient** | Millions of addresses fit in a few megabytes instead of a multi-gigabyte hash map. |
+| **Memory efficient** | The filter is a fixed ~1.8 MB however many addresses you watch. Past 1 million it still never misses a watched address, but false positives climb (~6% at 2 million), sending more candidates to the Postgres check. |
 
 The filter reloads from Postgres on startup, when addresses are **added or reactivated** (`LISTEN/NOTIFY` on `scanner_addresses_changed`), and after the notification listener reconnects. **Removing** an address only updates Postgres (`status = inactive`); the Bloom filter is not rebuilt (avoids full reloads on large watchlists). Deactivated addresses may remain in the filter until the next full reload, but Postgres confirmation prevents webhooks. An optional periodic safety-net reload can be enabled with `STATE_RESYNC_INTERVAL_SECONDS`; `0` disables it.
 
@@ -123,8 +123,8 @@ Tronvent is designed to handle **thousands to millions of watched addresses** an
 
 ## Prerequisites
 
-- **PostgreSQL 16+** with the `pgcrypto` extension (for `gen_random_uuid()`)
-- **TronGrid API key** — required for mainnet; [get one free at trongrid.io](https://www.trongrid.io/). Shasta and Nile testnets currently work without a key but setting one is recommended.
+- **PostgreSQL 16+** (no extensions required)
+- **TronGrid API key** — Tronvent won't start without `TRONGRID_API_KEY_SCANNER`, on any network; [get one free at trongrid.io](https://www.trongrid.io/). Mainnet needs a real key (TronGrid rejects unknown keys there with `401`). The Shasta and Nile testnets don't check it, so your mainnet key works there too.
 - **Go 1.26+** (local builds only)
 
 ---
@@ -132,6 +132,8 @@ Tronvent is designed to handle **thousands to millions of watched addresses** an
 ## Getting started
 
 Choose a deployment path below. All container-based paths use published artifacts; you do not need to clone this repository.
+
+The examples use the `latest` image. For production, pin an exact release instead (see [GitHub tags](https://github.com/degoke/tronvent/tags)). Images and charts drop the tag's `v`: release `v0.3.0` publishes `ghcr.io/degoke/tronvent:0.3.0` and chart version `0.3.0`. Images also get floating `0.3` and `0` tags.
 
 ### Docker Compose
 
@@ -154,7 +156,7 @@ services:
       retries: 10
 
   migrate:
-    image: ghcr.io/degoke/tronvent:1.0.0
+    image: ${TRONVENT_IMAGE:-ghcr.io/degoke/tronvent:latest}
     command: ["/app/migrate"]
     environment:
       DATABASE_URL: postgres://tronvent:${POSTGRES_PASSWORD:-tronvent-local}@postgres:5432/tronvent
@@ -163,7 +165,7 @@ services:
         condition: service_healthy
 
   tronvent:
-    image: ghcr.io/degoke/tronvent:1.0.0
+    image: ${TRONVENT_IMAGE:-ghcr.io/degoke/tronvent:latest}
     ports:
       - "8080:8080"
     env_file: .env
@@ -189,16 +191,18 @@ WEBHOOK_SIGNING_SECRET=another-long-random-secret
 Then start the complete local stack:
 
 ```bash
-TRONVENT_IMAGE=ghcr.io/degoke/tronvent:1.0.0 docker compose up -d
+docker compose up -d
 docker compose logs -f tronvent
 ```
+
+To pin a release, set `TRONVENT_IMAGE=ghcr.io/degoke/tronvent:<version> docker compose up -d`.
 
 Tronvent is available at `http://localhost:8080`. Stop the stack with `docker compose down`; add `-v` if you also want to remove the local PostgreSQL volume.
 
 ### Docker
 
 ```bash
-docker pull ghcr.io/degoke/tronvent:1.0.0
+docker pull ghcr.io/degoke/tronvent:latest
 docker run --rm -p 8080:8080 \
   -e DATABASE_URL="$DATABASE_URL" \
   -e TRONGRID_API_KEY_SCANNER="$TRONGRID_API_KEY_SCANNER" \
@@ -206,7 +210,7 @@ docker run --rm -p 8080:8080 \
   -e ADMIN_API_TOKEN="$ADMIN_API_TOKEN" \
   -e WEBHOOK_URL="$WEBHOOK_URL" \
   -e WEBHOOK_SIGNING_SECRET="$WEBHOOK_SIGNING_SECRET" \
-  ghcr.io/degoke/tronvent:1.0.0
+  ghcr.io/degoke/tronvent:latest
 ```
 
 Pre-built images are published to `ghcr.io/degoke/tronvent` on release.
@@ -222,7 +226,7 @@ Install a released chart from GHCR:
 ```bash
 helm registry login ghcr.io
 helm upgrade --install tronvent oci://ghcr.io/degoke/charts/tronvent \
-  --version 1.0.0 \
+  --set image.tag=latest \
   --namespace tronvent --create-namespace \
   --set secrets.databaseUrl="$DATABASE_URL" \
   --set secrets.tronGridApiKey="$TRONGRID_API_KEY_SCANNER" \
@@ -232,7 +236,9 @@ helm upgrade --install tronvent oci://ghcr.io/degoke/charts/tronvent \
   --set config.webhookUrl="$WEBHOOK_URL"
 ```
 
-The release workflow publishes both the Docker image and Helm chart when a `v*` tag is pushed. The chart is available at `oci://ghcr.io/degoke/charts/tronvent`.
+The release workflow publishes both the Docker image and Helm chart when a `v*` tag is pushed. The chart is available at `oci://ghcr.io/degoke/charts/tronvent`; without `--version` Helm installs the newest chart. For production, pin both: `--version <version> --set image.tag=<version>`.
+
+Charts `0.3.0` and earlier were published with a `v`-prefixed `appVersion`, so by default they try to pull `ghcr.io/degoke/tronvent:v0.3.0`, which doesn't exist; that is why the example sets `image.tag`. Later charts default to the matching image tag.
 
 ```bash
 # Run migrations first (see above)
@@ -267,7 +273,7 @@ You may run multiple replicas (`replicaCount` > 1) when you need more throughput
 make migrate
 ```
 
-Requires `DATABASE_URL`. Applies all pending files under `migrations/` (tracked in `schema_migrations`). Notable migrations: `001` (scanner schema), `002` (webhook endpoint fanout, direction-specific `event_types`, outbox `dedupe_key` shape, per-scope scanner cursor leases).
+Requires `DATABASE_URL`. Applies all pending files under `migrations/` (tracked in `schema_migrations`). Notable migrations: `001` (scanner schema), `002` (webhook endpoint fanout, direction-specific `event_types`, outbox `dedupe_key` shape, per-scope scanner cursor leases; deleting an endpoint also deletes its outbox events).
 
 #### 2. Configure environment
 
@@ -333,11 +339,11 @@ Metrics: `GET /metrics`
 
 | Network | `TRONGRID_BASE_URL` | Notes |
 |---|---|---|
-| **Mainnet** | `https://api.trongrid.io` | API key required |
-| **Shasta testnet** | `https://api.shasta.trongrid.io` | [Faucet](https://www.trongrid.io/faucet) |
-| **Nile testnet** | `https://nile.trongrid.io` | [Faucet](https://nileex.io/join/getJoinPage) |
+| **Mainnet** | `https://api.trongrid.io` | Real API key needed (unknown keys get `401`) |
+| **Shasta testnet** | `https://api.shasta.trongrid.io` | Key not checked by TronGrid · [Faucet](https://www.trongrid.io/faucet) |
+| **Nile testnet** | `https://nile.trongrid.io` | Key not checked by TronGrid · [Faucet](https://nileex.io/join/getJoinPage) |
 
-Set `TRONGRID_BASE_URL` to match the network your addresses and contracts live on. Use separate Tronvent deployments (and databases) per network.
+Set `TRONGRID_BASE_URL` to match the network your addresses and contracts live on. Use separate Tronvent deployments (and databases) per network. `TRONGRID_API_KEY_SCANNER` is required on every network; on the testnets your mainnet key works.
 
 Reference: [TRON network endpoints](https://developers.tron.network/docs/connect-to-the-tron-network)
 
@@ -350,7 +356,7 @@ Reference: [TRON network endpoints](https://developers.tron.network/docs/connect
 | Variable | Description |
 |---|---|
 | `DATABASE_URL` | PostgreSQL connection string |
-| `TRONGRID_API_KEY_SCANNER` | TronGrid API key(s), comma-separated for a round-robin pool (`TRON-PRO-API-KEY` header) |
+| `TRONGRID_API_KEY_SCANNER` | TronGrid API key(s), comma-separated for a round-robin pool (`TRON-PRO-API-KEY` header). Required on every network, including testnets |
 
 ### TronGrid & polling
 
@@ -362,6 +368,8 @@ Reference: [TRON network endpoints](https://developers.tron.network/docs/connect
 | `TRON_REQUIRED_CONFIRMATIONS` | `20` | Blocks to wait before scanning (finality vs latency) |
 | `TRON_TRC20_EVENT_CONFS` | `10` | Extra lag for TRC-20 event index |
 | `TRON_TRC20_CURSOR_RETAIN` | `50` | Re-scan recent blocks while event index catches up |
+| `TRON_TRC20_EVENT_RETRIES` | `3` | Attempts per block batch when the TRC-20 events API returns nothing for blocks that exist (index lag) |
+| `TRON_TRC20_EVENT_RETRY_DELAY_MS` | `2000` | Wait between those attempts (ms) |
 | `TRON_FETCH_CONCURRENCY` | `5` | Parallel TronGrid HTTP requests |
 | `TRON_HTTP_TIMEOUT_SECONDS` | `60` | HTTP client timeout |
 | `TRON_RECONCILE_BATCH_SIZE` | `1000` | Blocks per startup backfill job |
@@ -411,7 +419,7 @@ All `/api/v1/*` routes require `Authorization: Bearer <ADMIN_API_TOKEN>`.
 | `POST` | `/api/v1/webhook/endpoints` | Create endpoint (generates ed25519 keys if omitted) |
 | `GET` | `/api/v1/webhook/endpoints/{id}` | Get one endpoint |
 | `PATCH` | `/api/v1/webhook/endpoints/{id}` | Update URL, event types, active flag, notify email, or signing key |
-| `DELETE` | `/api/v1/webhook/endpoints/{id}` | Remove endpoint |
+| `DELETE` | `/api/v1/webhook/endpoints/{id}` | Remove endpoint along with its outbox events and delivery attempts. Returns `409` while pending, delivering or failed events remain; `?force=true` discards them. To keep history, `PATCH` `{"isActive": false}` instead |
 | `GET` | `/api/v1/webhook/schemas` | JSON Schemas for all event types |
 | `GET` | `/api/v1/webhook/schemas/event?type=transaction.trx.received` | One event type schema |
 | `GET` | `/api/v1/webhooks?status=failed&limit=50` | List webhook events (`status=dead` or `status=all` are also supported) |
@@ -443,7 +451,7 @@ Content-Type:           application/json
 ```json
 {
   "type": "transaction.trc20.received",
-  "timestamp": "2024-06-24T15:04:05.123456789Z",
+  "timestamp": "2024-06-24T13:09:27Z",
   "data": {
     "id": "550e8400-e29b-41d4-a716-446655440000",
     "txHash": "abc123...",
@@ -453,7 +461,7 @@ Content-Type:           application/json
     "tokenContractAddress": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
     "blockNumber": 65432100,
     "blockTimestamp": 1719234567000,
-    "confirmations": 5
+    "confirmations": 30
   }
 }
 ```
@@ -469,7 +477,9 @@ Supported event types (asset + direction relative to watched addresses):
 
 **Received** means a watched address is the transfer recipient; **broadcasted** means a watched address is the sender. A self-transfer to the same watched address can emit both event types (two deliveries).
 
-The top-level `timestamp` is when the transfer occurred (block time, ISO 8601 UTC). For TRC-20, `data.amount` is the raw token value (check contract decimals). For TRX, it is a decimal string in TRX units.
+The top-level `timestamp` is when the transfer occurred: the block time as RFC 3339 UTC, the same instant as `data.blockTimestamp` (milliseconds since epoch). Block times have at most millisecond precision and a zero fraction is omitted, so values usually look like `2024-06-24T13:09:27Z`. For TRC-20, `data.amount` is the raw token value (check contract decimals). For TRX, it is a decimal string in TRX units.
+
+`data.confirmations` is how many blocks the latest chain tip Tronvent had read was ahead of `blockNumber` when it matched the transfer. It is frozen when the event is created: retries (automatic or via the retry API) resend the stored payload, so the value never grows. Forward scans only reach blocks with at least `TRON_REQUIRED_CONFIRMATIONS` confirmations, plus `TRON_TRC20_EVENT_CONFS` for TRC-20 (20 and 30 with the defaults), so a retried delivery days later still says 20 or 30. **Don't use it to decide whether a transfer is final**; compare `blockNumber` with a current chain tip instead. Admin replays use the most recent tip the poller has read, so replaying very recent blocks can report fewer.
 
 ### Verify signatures
 

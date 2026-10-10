@@ -31,7 +31,7 @@ type DB interface {
 	ListWebhookEndpoints(ctx context.Context) ([]internaldb.WebhookEndpoint, error)
 	GetWebhookEndpoint(ctx context.Context, endpointID string) (*internaldb.WebhookEndpoint, error)
 	UpsertWebhookEndpoint(ctx context.Context, ep internaldb.WebhookEndpoint) (*internaldb.WebhookEndpoint, error)
-	DeleteWebhookEndpoint(ctx context.Context, endpointID string) error
+	DeleteWebhookEndpoint(ctx context.Context, endpointID string, force bool) error
 	ListCursors(ctx context.Context) ([]internaldb.CursorRow, error)
 	EnqueueRetryJob(ctx context.Context, fromBlock, toBlock int64) (internaldb.EnqueueRetryResult, error)
 	ListRetryJobs(ctx context.Context, status string, limit int) ([]internaldb.RetryJobRecord, error)
@@ -328,8 +328,7 @@ func (s *Server) handlePutWebhook(w http.ResponseWriter, r *http.Request) {
 
 	ep, err := s.db.UpsertPrimaryWebhookEndpointPreserveSecret(r.Context(), req.WebhookURL, req.SigningSecret, true, "api", req.EventTypes)
 	if err != nil {
-		slog.Error("upsert webhook endpoint", "err", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save webhook config"})
+		writeWebhookSaveError(w, err, "failed to save webhook config")
 		return
 	}
 	s.webhookConfig.UpsertEndpoint(*ep)

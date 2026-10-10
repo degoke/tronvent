@@ -13,6 +13,7 @@ import (
 
 	"github.com/degoke/tronvent/internal/config"
 	internaldb "github.com/degoke/tronvent/internal/db"
+	"github.com/degoke/tronvent/internal/webhookpayload"
 )
 
 type stubDB struct {
@@ -446,7 +447,11 @@ func TestPoller_RetryBlockRange(t *testing.T) {
 	dbStub.mu.Unlock()
 
 	if eventCount != 1 {
-		t.Errorf("expected 1 replayed event, got %d", eventCount)
+		t.Fatalf("expected 1 replayed event, got %d", eventCount)
+	}
+	// Replays measure confirmations against the tip fetched for the replay (100 - 51).
+	if got := outboxConfirmations(t, outbox, 0); got != 49 {
+		t.Errorf("expected 49 confirmations on replayed event, got %d", got)
 	}
 	if forwardCursor != 100 {
 		t.Errorf("expected forward cursor to stay at 100, got %d", forwardCursor)
@@ -635,5 +640,95 @@ func TestTrc20CursorAfterBatch(t *testing.T) {
 				t.Errorf("trc20CursorAfterBatch(%d,%d,%d) = %d, want %d", tc.from, tc.batchStart, tc.batchEnd, got, tc.want)
 			}
 		})
+	}
+}
+
+func outboxConfirmations(t *testing.T, outbox *stubOutbox, i int) int64 {
+	t.Helper()
+	outbox.mu.Lock()
+	raw := outbox.events[i]
+	outbox.mu.Unlock()
+	var env webhookpayload.Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("decode outbox event: %v", err)
+	}
+	return env.Data.Confirmations
+}
+
+func TestPoller_TRXConfirmationsFromChainTip(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "getnowblock"):
+			_, _ = fmt.Fprint(w, `{"blockID":"block-105","block_header":{"raw_data":{"number":105,"timestamp":1700000015000}},"transactions":[]}`)
+		case strings.Contains(r.URL.Path, "getblockbylimitnext"):
+			block := fmt.Sprintf(`{"block":[{"blockID":"block-100","block_header":{"raw_data":{"number":100,"timestamp":1700000000000}},"transactions":[{"txID":"trx-confs","raw_data":{"contract":[{"type":"TransferContract","parameter":{"value":{"amount":1000000,"owner_address":"%s","to_address":"%s"}}}]}}]}]}`, "TSenderNotWatchedXXXXXXXXXXXXXXXXXXXX", watchedTRXReceiver)
+			_, _ = w.Write([]byte(block))
+		}
+	}))
+	defer srv.Close()
+
+	outbox := &stubOutbox{}
+	p := &Poller{
+		cfg: &config.Config{TronGridBaseURL: srv.URL, TronGridAPIKey: "test", RequiredConfs: 5},
+		db:  newStubDB(99), outbox: outbox, addresses: NewHashSet([]string{watchedTRXReceiver}),
+		contracts: stubContracts{}, httpClient: srv.Client(), sem: make(chan struct{}, 5),
+	}
+	if err := p.poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	outbox.mu.Lock()
+	n := len(outbox.events)
+	outbox.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("expected one event, got %d", n)
+	}
+	if got := outboxConfirmations(t, outbox, 0); got != 5 {
+		t.Fatalf("expected 5 confirmations (tip 105 - block 100), got %d", got)
+	}
+}
+
+func TestPoller_TRC20ConfirmationsFromChainTip(t *testing.T) {
+	const contract = "TXLAQ63Xg1NAzckPwKHvzw7CSEmLMEqcdj"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "getnowblock"):
+			_, _ = fmt.Fprint(w, `{"blockID":"block-100","block_header":{"raw_data":{"number":100,"timestamp":1700000100000}},"transactions":[]}`)
+		case strings.Contains(r.URL.Path, "getblockbylimitnext"):
+			_, _ = fmt.Fprint(w, `{"block":[{"blockID":"block-95","block_header":{"raw_data":{"number":95,"timestamp":1700000095000}},"transactions":[]}]}`)
+		case strings.Contains(r.URL.Path, "/v1/contracts/"):
+			resp := map[string]any{
+				"data": []map[string]any{{
+					"transaction_id": "0xtrc20confs", "block_number": 95, "block_timestamp": 1700000095000,
+					"result": map[string]any{"from": "TSenderNotWatchedXXXXXXXXXXXXXXXXXXXX", "to": knownTRC20Address, "value": "7"},
+				}},
+				"meta": map[string]any{"page_size": 1, "at": int64(1700000095000), "fingerprint": ""}, "success": true,
+			}
+			_ = json.NewEncoder(w).Encode(resp)
+		}
+	}))
+	defer srv.Close()
+
+	outbox := &stubOutbox{}
+	dbStub := newStubDB(98) // TRX is caught up, so only the TRC-20 scope scans
+	dbStub.scannedBlocks[contract] = 94
+	p := &Poller{
+		// tip 100 - 2 required confs - 3 event confs = trc20SafeBlock 95
+		cfg: &config.Config{TronGridBaseURL: srv.URL, TronGridAPIKey: "test", RequiredConfs: 2, Trc20EventConfs: 3, Trc20CursorRetain: 0, Trc20EventRetries: 1},
+		db:  dbStub, outbox: outbox, addresses: NewHashSet([]string{knownTRC20Address}),
+		contracts: stubContracts{contracts: []string{contract}}, httpClient: srv.Client(), sem: make(chan struct{}, 5),
+	}
+	if err := p.poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	outbox.mu.Lock()
+	n := len(outbox.events)
+	outbox.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("expected one TRC-20 event, got %d", n)
+	}
+	if got := outboxConfirmations(t, outbox, 0); got != 5 {
+		t.Fatalf("expected 5 confirmations (tip 100 - block 95), got %d", got)
 	}
 }

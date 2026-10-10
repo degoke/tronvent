@@ -117,3 +117,28 @@ func TestMatchedTransferEvents_ConfirmErrorFailOpen(t *testing.T) {
 		t.Fatalf("expected fail-open enqueue on confirm error, got %+v", events)
 	}
 }
+
+func TestMatchedTransferEvents_ConfirmationsFromChainTip(t *testing.T) {
+	watched := "TConfsXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+	db := &activeAddressDB{}
+	p := testPoller(NewHashSet([]string{watched}), db)
+	confirm := NewAddressConfirm(db)
+	p.chainTip.Store(100)
+	events := p.matchedTransferEvents(context.Background(), confirm, "TRX", "hash", "TSenderXXX", watched, "1", "", 80, 2)
+	if len(events) != 1 || events[0].Confirmations != 20 {
+		t.Fatalf("expected one event with 20 confirmations, got %+v", events)
+	}
+}
+
+func TestConfirmationsAtNeverNegative(t *testing.T) {
+	cases := []struct{ tip, block, want int64 }{
+		{tip: 120, block: 100, want: 20},
+		{tip: 100, block: 100, want: 0},
+		{tip: 0, block: 100, want: 0},
+	}
+	for _, c := range cases {
+		if got := confirmationsAt(c.tip, c.block); got != c.want {
+			t.Errorf("confirmationsAt(%d, %d) = %d, want %d", c.tip, c.block, got, c.want)
+		}
+	}
+}

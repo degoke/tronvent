@@ -151,6 +151,9 @@ type Poller struct {
 	keys             *tronGridAPIKeyPool
 	scanWorkerID     string
 	forwardScanReady atomic.Bool
+	// chainTip is the latest block number GetLatestBlockNumber has returned. It is
+	// only used to stamp webhook confirmations; 0 until the first tip read.
+	chainTip atomic.Int64
 }
 
 // NewPoller creates a Poller wired to Postgres cursors and the webhook outbox.
@@ -951,6 +954,7 @@ func (p *Poller) GetLatestBlockNumber(ctx context.Context) (int64, error) {
 	if err := p.tronGridDo(ctx, http.MethodGet, url, nil, &block); err != nil {
 		return 0, err
 	}
+	p.chainTip.Store(block.BlockHeader.RawData.Number)
 	return block.BlockHeader.RawData.Number, nil
 }
 
