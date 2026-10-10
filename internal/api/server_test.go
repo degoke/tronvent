@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -16,6 +18,7 @@ import (
 	internaldb "github.com/degoke/tronvent/internal/db"
 	"github.com/degoke/tronvent/internal/store"
 	"github.com/degoke/tronvent/internal/webhookpayload"
+	"github.com/degoke/tronvent/internal/webhookspec"
 )
 
 type memDB struct {
@@ -27,7 +30,12 @@ type memDB struct {
 	webhookEvents    []internaldb.DashboardWebhookEvent
 	webhookAttempts  map[string][]internaldb.DashboardDeliveryAttempt
 	listActiveCalls  int
+	upsertErr        error
+	deleteErr        error
+	deleteForce      bool
 }
+
+const testEndpointID = "11111111-1111-1111-1111-111111111111"
 
 func (m *memDB) ListActiveAddresses(_ context.Context) ([]string, error) {
 	m.listActiveCalls++
@@ -144,13 +152,26 @@ func (m *memDB) GetWebhookEndpoint(_ context.Context, endpointID string) (*inter
 	return nil, nil
 }
 
-func (m *memDB) DeleteWebhookEndpoint(_ context.Context, endpointID string) error {
+func (m *memDB) DeleteWebhookEndpoint(_ context.Context, endpointID string, force bool) error {
+	m.deleteForce = force
+	if m.deleteErr != nil {
+		return m.deleteErr
+	}
+	for i, ep := range m.webhookEndpoints {
+		if ep.ID == endpointID {
+			m.webhookEndpoints = append(m.webhookEndpoints[:i], m.webhookEndpoints[i+1:]...)
+			return nil
+		}
+	}
 	return internaldb.ErrWebhookEndpointNotFound
 }
 
 func (m *memDB) UpsertWebhookEndpoint(_ context.Context, ep internaldb.WebhookEndpoint) (*internaldb.WebhookEndpoint, error) {
+	if m.upsertErr != nil {
+		return nil, m.upsertErr
+	}
 	if ep.ID == "" {
-		ep.ID = "ep-1"
+		ep.ID = testEndpointID
 	}
 	for i, cur := range m.webhookEndpoints {
 		if cur.ID == ep.ID {
@@ -370,6 +391,100 @@ func TestPutWebhookUpdatesConfig(t *testing.T) {
 	}
 }
 
+func TestWebhookSaveErrorStatus(t *testing.T) {
+	invalid := fmt.Errorf("%w: webhook URL must use https", internaldb.ErrInvalidWebhookEndpoint)
+	cases := []struct {
+		name, method, path string
+		body               map[string]any
+		err                error
+		want               int
+	}{
+		{"put invalid", http.MethodPut, "/api/v1/webhook", map[string]any{"webhookUrl": "http://example.com/hook"}, invalid, http.StatusBadRequest},
+		{"put host lookup", http.MethodPut, "/api/v1/webhook", map[string]any{"webhookUrl": "https://example.com/hook"}, fmt.Errorf("%w for %q", webhookspec.ErrHostLookup, "example.com"), http.StatusServiceUnavailable},
+		{"put store failure", http.MethodPut, "/api/v1/webhook", map[string]any{"webhookUrl": "https://example.com/hook"}, errors.New("conn refused"), http.StatusInternalServerError},
+		{"post invalid", http.MethodPost, "/api/v1/webhook/endpoints", map[string]any{"webhookUrl": "http://example.com/hook"}, invalid, http.StatusBadRequest},
+		{"post store failure", http.MethodPost, "/api/v1/webhook/endpoints", map[string]any{"webhookUrl": "https://example.com/hook"}, errors.New("conn refused"), http.StatusInternalServerError},
+		{"patch invalid", http.MethodPatch, "/api/v1/webhook/endpoints/" + testEndpointID, map[string]any{"webhookUrl": "http://example.com/hook"}, invalid, http.StatusBadRequest},
+		{"patch store failure", http.MethodPatch, "/api/v1/webhook/endpoints/" + testEndpointID, map[string]any{"isActive": false}, errors.New("conn refused"), http.StatusInternalServerError},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := &memDB{
+				webhookEndpoints: []internaldb.WebhookEndpoint{{ID: testEndpointID, WebhookURL: "https://example.com/hooks/1", IsActive: true}},
+				upsertErr:        tc.err,
+			}
+			srv := newTestServer(t, mem)
+			body, _ := json.Marshal(tc.body)
+			req := httptest.NewRequest(tc.method, tc.path, bytes.NewReader(body))
+			req.Header.Set("Authorization", "Bearer secret")
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, req)
+			if rec.Code != tc.want {
+				t.Fatalf("expected %d, got %d body=%s", tc.want, rec.Code, rec.Body.String())
+			}
+			if tc.want == http.StatusBadRequest && !strings.Contains(rec.Body.String(), "must use https") {
+				t.Fatalf("expected validation reason in body, got %s", rec.Body.String())
+			}
+			if tc.want != http.StatusBadRequest && strings.Contains(rec.Body.String(), "conn refused") {
+				t.Fatalf("internal error leaked to client: %s", rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestDeleteWebhookEndpoint(t *testing.T) {
+	path := "/api/v1/webhook/endpoints/" + testEndpointID
+	cases := []struct {
+		name, path  string
+		deleteErr   error
+		want        int
+		wantForce   bool
+		wantRemoved bool
+	}{
+		{name: "deletes", path: path, want: http.StatusNoContent, wantRemoved: true},
+		{name: "force flag", path: path + "?force=true", want: http.StatusNoContent, wantForce: true, wantRemoved: true},
+		{name: "undelivered events refuse delete", path: path, deleteErr: internaldb.ErrWebhookEndpointHasUndeliveredEvents, want: http.StatusConflict},
+		{name: "unknown endpoint", path: path, deleteErr: internaldb.ErrWebhookEndpointNotFound, want: http.StatusNotFound},
+		{name: "malformed id", path: "/api/v1/webhook/endpoints/not-a-uuid", want: http.StatusNotFound},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := &memDB{
+				webhookEndpoints: []internaldb.WebhookEndpoint{{ID: testEndpointID, WebhookURL: "https://example.com/hooks/1", IsActive: true}},
+				deleteErr:        tc.deleteErr,
+			}
+			srv := newTestServer(t, mem)
+			req := httptest.NewRequest(http.MethodDelete, tc.path, nil)
+			req.Header.Set("Authorization", "Bearer secret")
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, req)
+			if rec.Code != tc.want {
+				t.Fatalf("expected %d, got %d body=%s", tc.want, rec.Code, rec.Body.String())
+			}
+			if mem.deleteForce != tc.wantForce {
+				t.Fatalf("force = %v, want %v", mem.deleteForce, tc.wantForce)
+			}
+			if removed := len(mem.webhookEndpoints) == 0; removed != tc.wantRemoved {
+				t.Fatalf("endpoint removed = %v, want %v", removed, tc.wantRemoved)
+			}
+		})
+	}
+}
+
+func TestMalformedWebhookEndpointIDNotFound(t *testing.T) {
+	for _, method := range []string{http.MethodGet, http.MethodPatch} {
+		mem := &memDB{}
+		srv := newTestServer(t, mem)
+		req := httptest.NewRequest(method, "/api/v1/webhook/endpoints/not-a-uuid", strings.NewReader(`{}`))
+		req.Header.Set("Authorization", "Bearer secret")
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("%s: expected 404, got %d body=%s", method, rec.Code, rec.Body.String())
+		}
+	}
+}
+
 func TestPostWebhookEndpointRejectsLegacyEventTypes(t *testing.T) {
 	mem := &memDB{}
 	srv := newTestServer(t, mem)
@@ -388,12 +503,12 @@ func TestPostWebhookEndpointRejectsLegacyEventTypes(t *testing.T) {
 
 func TestPatchWebhookEndpointRejectsLegacyEventTypes(t *testing.T) {
 	mem := &memDB{webhookEndpoints: []internaldb.WebhookEndpoint{{
-		ID: "ep-1", WebhookURL: "https://example.com/hooks/1", IsActive: true,
+		ID: testEndpointID, WebhookURL: "https://example.com/hooks/1", IsActive: true,
 		EventTypes: webhookpayload.DefaultEventTypes(),
 	}}}
 	srv := newTestServer(t, mem)
 	body, _ := json.Marshal(map[string]any{"eventTypes": []string{"transaction.trc20"}})
-	req := httptest.NewRequest(http.MethodPatch, "/api/v1/webhook/endpoints/ep-1", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/webhook/endpoints/"+testEndpointID, bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer secret")
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)

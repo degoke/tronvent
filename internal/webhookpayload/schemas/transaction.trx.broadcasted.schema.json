@@ -20,7 +20,7 @@
         "tokenContractAddress": { "type": "string" },
         "blockNumber": { "type": "integer" },
         "blockTimestamp": { "type": "integer", "description": "Block time in milliseconds since epoch" },
-        "confirmations": { "type": "integer" }
+        "confirmations": { "type": "integer", "minimum": 0, "description": "Blocks the chain tip was ahead of blockNumber when Tronvent matched the transfer. Frozen at that moment and not refreshed on retries, so do not use it as a finality check" }
       },
       "additionalProperties": false
     }

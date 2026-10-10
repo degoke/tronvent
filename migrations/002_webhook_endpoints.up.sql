@@ -23,8 +23,14 @@ CREATE TABLE IF NOT EXISTS webhook_endpoints (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
+-- ON DELETE CASCADE so deleting an endpoint removes its outbox rows (and, through the
+-- cascade on webhook_delivery_attempts, their attempt logs); without it DELETE
+-- /api/v1/webhook/endpoints/{id} fails once the endpoint has any history. SET NULL is
+-- deliberately not used: the delivery worker sends rows with no endpoint_id to the
+-- primary endpoint, which would re-route a deleted subscriber's events to another one.
+-- The API refuses the delete while undelivered events remain unless ?force=true is passed.
 ALTER TABLE webhook_events
-  ADD COLUMN IF NOT EXISTS endpoint_id uuid REFERENCES webhook_endpoints(id);
+  ADD COLUMN IF NOT EXISTS endpoint_id uuid REFERENCES webhook_endpoints(id) ON DELETE CASCADE;
 
 INSERT INTO webhook_endpoints (
   webhook_url, signing_secret, signing_secret_previous, event_types, is_active, source, created_at, updated_at

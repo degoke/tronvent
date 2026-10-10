@@ -5,12 +5,27 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 
 	internaldb "github.com/degoke/tronvent/internal/db"
 	"github.com/degoke/tronvent/internal/webhookpayload"
 	"github.com/degoke/tronvent/internal/webhookspec"
 )
+
+var endpointIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// endpointIDParam returns the {endpointID} path value. Endpoint ids are uuids, so a
+// malformed one cannot exist: answer 404 here instead of letting Postgres reject the
+// cast and surface a 500.
+func endpointIDParam(w http.ResponseWriter, r *http.Request) (string, bool) {
+	id := r.PathValue("endpointID")
+	if !endpointIDPattern.MatchString(id) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "webhook endpoint not found"})
+		return "", false
+	}
+	return id, true
+}
 
 func (s *Server) handleListWebhookEndpoints(w http.ResponseWriter, r *http.Request) {
 	eps, err := s.db.ListWebhookEndpoints(r.Context())
@@ -27,7 +42,10 @@ func (s *Server) handleListWebhookEndpoints(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Server) handleGetWebhookEndpoint(w http.ResponseWriter, r *http.Request) {
-	endpointID := r.PathValue("endpointID")
+	endpointID, ok := endpointIDParam(w, r)
+	if !ok {
+		return
+	}
 	ep, err := s.db.GetWebhookEndpoint(r.Context(), endpointID)
 	if err != nil {
 		slog.Error("get webhook endpoint", "endpointId", endpointID, "err", err)
@@ -56,7 +74,7 @@ func (s *Server) handlePostWebhookEndpoint(w http.ResponseWriter, r *http.Reques
 	ep.Source = "api"
 	out, err := s.db.UpsertWebhookEndpoint(r.Context(), ep)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeWebhookSaveError(w, err, "failed to save webhook endpoint")
 		return
 	}
 	s.webhookConfig.UpsertEndpoint(*out)
@@ -64,7 +82,10 @@ func (s *Server) handlePostWebhookEndpoint(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) handlePatchWebhookEndpoint(w http.ResponseWriter, r *http.Request) {
-	endpointID := r.PathValue("endpointID")
+	endpointID, ok := endpointIDParam(w, r)
+	if !ok {
+		return
+	}
 	existing, err := s.db.GetWebhookEndpoint(r.Context(), endpointID)
 	if err != nil {
 		slog.Error("get webhook endpoint for patch", "endpointId", endpointID, "err", err)
@@ -87,7 +108,7 @@ func (s *Server) handlePatchWebhookEndpoint(w http.ResponseWriter, r *http.Reque
 	}
 	out, err := s.db.UpsertWebhookEndpoint(r.Context(), merged)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeWebhookSaveError(w, err, "failed to save webhook endpoint")
 		return
 	}
 	s.webhookConfig.UpsertEndpoint(*out)
@@ -95,10 +116,20 @@ func (s *Server) handlePatchWebhookEndpoint(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Server) handleDeleteWebhookEndpoint(w http.ResponseWriter, r *http.Request) {
-	endpointID := r.PathValue("endpointID")
-	if err := s.db.DeleteWebhookEndpoint(r.Context(), endpointID); err != nil {
+	endpointID, ok := endpointIDParam(w, r)
+	if !ok {
+		return
+	}
+	force := r.URL.Query().Get("force") == "true"
+	if err := s.db.DeleteWebhookEndpoint(r.Context(), endpointID, force); err != nil {
 		if errors.Is(err, internaldb.ErrWebhookEndpointNotFound) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "webhook endpoint not found"})
+			return
+		}
+		if errors.Is(err, internaldb.ErrWebhookEndpointHasUndeliveredEvents) {
+			writeJSON(w, http.StatusConflict, map[string]string{
+				"error": "webhook endpoint has undelivered events; wait for them to finish or pass ?force=true to discard them",
+			})
 			return
 		}
 		slog.Error("delete webhook endpoint", "endpointId", endpointID, "err", err)
@@ -196,6 +227,23 @@ func mergeEndpointPatch(existing internaldb.WebhookEndpoint, req webhookEndpoint
 		existing.FailureNotifyEmail = strings.TrimSpace(*req.FailureNotifyEmail)
 	}
 	return existing, nil
+}
+
+// writeWebhookSaveError answers 400 with the reason when the endpoint was rejected
+// (bad URL, signing key, or event types), 503 when the webhook host could not be
+// resolved right now, and logs anything else as a 500.
+func writeWebhookSaveError(w http.ResponseWriter, err error, msg string) {
+	if errors.Is(err, internaldb.ErrInvalidWebhookEndpoint) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, webhookspec.ErrHostLookup) {
+		slog.Warn(msg, "err", err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "could not resolve the webhook host right now; try again"})
+		return
+	}
+	slog.Error(msg, "err", err)
+	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": msg})
 }
 
 func webhookEndpointResponse(ep internaldb.WebhookEndpoint) map[string]any {

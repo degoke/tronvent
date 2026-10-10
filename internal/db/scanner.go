@@ -766,6 +766,19 @@ func (c *Client) EnqueueWebhookEvent(ctx context.Context, eventType, scope, txHa
 		if !ep.IsActive || !webhookpayload.EndpointSubscribes(ep.EventTypes, stdType) {
 			continue
 		}
+		if ep.ID != "" {
+			// The endpoint list was read before this transaction. Take a key-share lock so a
+			// concurrent DeleteWebhookEndpoint waits for us, and skip endpoints deleted since;
+			// otherwise the INSERT below would hit the FK and roll back every endpoint's row.
+			var still string
+			err := tx.QueryRow(ctx, `SELECT id::text FROM webhook_endpoints WHERE id = $1 FOR KEY SHARE`, ep.ID).Scan(&still)
+			if errors.Is(err, pgx.ErrNoRows) {
+				continue
+			}
+			if err != nil {
+				return "", fmt.Errorf("EnqueueWebhookEvent: lock endpoint: %w", err)
+			}
+		}
 		id := newUUID()
 		payloadMap := map[string]any{}
 		if payload != nil {

@@ -55,6 +55,28 @@ jobs:
           version: v2.12
           args: ./...
 
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+
+      - name: Check Helm chart image tag
+        run: |
+          # Docker images are tagged without the "v" (0.3.0), so the chart must never render
+          # a v-prefixed tag, whichever way appVersion was set when it was packaged.
+          set -euo pipefail
+          helm lint charts/tronvent --set secrets.databaseUrl=x --set secrets.tronGridApiKey=x
+          out="$RUNNER_TEMP/charts"
+          mkdir -p "$out"
+          for app_version in v9.9.9 9.9.9; do
+            helm package charts/tronvent --version 9.9.9 --app-version "$app_version" -d "$out"
+            image=$(helm template tronvent "$out/tronvent-9.9.9.tgz" \
+              --set secrets.create=false --set secrets.existingSecret=ci \
+              | grep -o 'image: "ghcr.io/degoke/tronvent:[^"]*"')
+            echo "appVersion=$app_version renders $image"
+            test "$image" = 'image: "ghcr.io/degoke/tronvent:9.9.9"'
+          done
+
       - name: Migrate test database
         run: go run ./cmd/migrate
 

@@ -89,7 +89,7 @@ jobs:
         run: echo "$GHCR_TOKEN" | helm registry login ghcr.io --username "${{ github.actor }}" --password-stdin
 
       - name: Package chart
-        run: helm package charts/tronvent --version "${GITHUB_REF_NAME#v}" --app-version "${GITHUB_REF_NAME}"
+        run: helm package charts/tronvent --version "${GITHUB_REF_NAME#v}" --app-version "${GITHUB_REF_NAME#v}"
 
       - name: Push chart to GHCR
         run: helm push tronvent-*.tgz "oci://ghcr.io/${{ github.repository_owner }}/charts"

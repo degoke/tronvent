@@ -5,6 +5,7 @@ replicaCount: 1
 image:
   repository: ghcr.io/degoke/tronvent
   pullPolicy: IfNotPresent
+  # Defaults to the chart appVersion with any leading "v" removed (images are tagged 0.3.0, not v0.3.0).
   tag: ""
 
 imagePullSecrets: []
