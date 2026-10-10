@@ -506,13 +506,13 @@ func (c *Client) GetScannedBlock(ctx context.Context, scope string) (int64, erro
 // Renewed during each scan batch; keep comfortably above worst-case TronGrid batch latency.
 const ScannerScopeLeaseDuration = 10 * time.Minute
 
-// ErrScannerCursorLeasesRequired is returned when migration 006 has not been applied.
+// ErrScannerCursorLeasesRequired is returned when scanner cursor lease columns are missing.
 var ErrScannerCursorLeasesRequired = errors.New("scanner cursor lease columns required")
 
 // ErrCursorLeaseConflict is returned when SetScannedBlock is called without holding the active lease.
 var ErrCursorLeaseConflict = errors.New("scanner cursor update blocked by another scope lease holder")
 
-// ScannerCursorLeasesEnabled reports whether migration 006 lease columns exist.
+// ScannerCursorLeasesEnabled reports whether scanner cursor lease columns exist.
 func (c *Client) ScannerCursorLeasesEnabled(ctx context.Context) (bool, error) {
 	var ok bool
 	err := c.Pool.QueryRow(ctx, `
@@ -529,14 +529,14 @@ func (c *Client) ScannerCursorLeasesEnabled(ctx context.Context) (bool, error) {
 	return ok, nil
 }
 
-// RequireScannerCursorLeases returns an error when migration 006 is not applied.
+// RequireScannerCursorLeases returns an error when scanner cursor lease columns are missing.
 func (c *Client) RequireScannerCursorLeases(ctx context.Context) error {
 	ok, err := c.ScannerCursorLeasesEnabled(ctx)
 	if err != nil {
 		return err
 	}
 	if !ok {
-		return fmt.Errorf("%w: apply migrations/006_scanner_cursor_scope_lease.up.sql", ErrScannerCursorLeasesRequired)
+		return fmt.Errorf("%w: apply migrations/002_webhook_endpoints.up.sql", ErrScannerCursorLeasesRequired)
 	}
 	return nil
 }

@@ -1,4 +1,4 @@
--- Standard Webhooks: rotation fields on legacy singleton, webhook_endpoints, fanout column, drop singleton.
+-- Webhooks: multi-endpoint fanout, direction-specific event types, outbox dedupe keys, scanner scope leases.
 
 ALTER TABLE scanner_webhook_config
   ADD COLUMN IF NOT EXISTS signing_secret_previous text,
@@ -10,7 +10,12 @@ CREATE TABLE IF NOT EXISTS webhook_endpoints (
   signing_secret text NOT NULL,
   signing_secret_previous text,
   signing_public_key text,
-  event_types text[] NOT NULL DEFAULT ARRAY['transaction.trx', 'transaction.trc20'],
+  event_types text[] NOT NULL DEFAULT ARRAY[
+    'transaction.trx.received',
+    'transaction.trx.broadcasted',
+    'transaction.trc20.received',
+    'transaction.trc20.broadcasted'
+  ],
   is_active boolean NOT NULL DEFAULT true,
   failure_notify_email text,
   source text NOT NULL DEFAULT 'api',
@@ -55,6 +60,28 @@ WHERE signing_secret_previous IS NOT NULL
   AND signing_secret_previous <> ''
   AND signing_secret_previous !~ '^(whsec_|whsk_)';
 
+UPDATE webhook_endpoints we
+SET event_types = sub.new_types
+FROM (
+  SELECT
+    id,
+    array_agg(DISTINCT mapped ORDER BY mapped) AS new_types
+  FROM webhook_endpoints,
+  LATERAL unnest(event_types) AS t,
+  LATERAL (
+    SELECT unnest(
+      CASE t
+        WHEN 'transaction.trx' THEN ARRAY['transaction.trx.received', 'transaction.trx.broadcasted']
+        WHEN 'transaction.trc20' THEN ARRAY['transaction.trc20.received', 'transaction.trc20.broadcasted']
+        ELSE ARRAY[t]
+      END
+    ) AS mapped
+  ) expanded
+  GROUP BY id
+) sub
+WHERE we.id = sub.id
+  AND we.event_types && ARRAY['transaction.trx', 'transaction.trc20']::text[];
+
 -- Only when a single endpoint exists (typical singleton migration). Skip when multiple endpoints already exist.
 UPDATE webhook_events e
 SET endpoint_id = sub.id
@@ -64,23 +91,37 @@ FROM (
 WHERE e.endpoint_id IS NULL
   AND (SELECT count(*)::int FROM webhook_endpoints) = 1;
 
--- Align dedupe keys with fanout format scope:txHash:endpointID (legacy rows used scope:txHash).
+-- Align dedupe keys with EnqueueWebhookEvent (event type + transfer leg + endpoint).
 UPDATE webhook_events e
-SET dedupe_key = e.scope || ':' || e.tx_hash || ':' || e.endpoint_id::text
+SET dedupe_key =
+  e.scope || ':' || e.tx_hash || ':' ||
+  COALESCE(NULLIF(btrim(e.event_type), ''), COALESCE(e.payload->>'type', 'unknown')) || ':' ||
+  COALESCE(e.payload->'data'->>'fromAddress', '') || ':' ||
+  COALESCE(e.payload->'data'->>'toAddress', '') || ':' ||
+  COALESCE(e.payload->'data'->>'amount', '') || ':' ||
+  e.endpoint_id::text
 WHERE e.endpoint_id IS NOT NULL
-  AND e.dedupe_key = (e.scope || ':' || e.tx_hash)
-  AND NOT EXISTS (
-    SELECT 1 FROM webhook_events other
-    WHERE other.dedupe_key = e.scope || ':' || e.tx_hash || ':' || e.endpoint_id::text
-      AND other.id <> e.id
+  AND e.dedupe_key IS DISTINCT FROM (
+    e.scope || ':' || e.tx_hash || ':' ||
+    COALESCE(NULLIF(btrim(e.event_type), ''), COALESCE(e.payload->>'type', 'unknown')) || ':' ||
+    COALESCE(e.payload->'data'->>'fromAddress', '') || ':' ||
+    COALESCE(e.payload->'data'->>'toAddress', '') || ':' ||
+    COALESCE(e.payload->'data'->>'amount', '') || ':' ||
+    e.endpoint_id::text
   );
 
-DELETE FROM webhook_events old
-WHERE old.endpoint_id IS NOT NULL
-  AND old.dedupe_key = (old.scope || ':' || old.tx_hash)
-  AND EXISTS (
-    SELECT 1 FROM webhook_events newer
-    WHERE newer.dedupe_key = old.scope || ':' || old.tx_hash || ':' || old.endpoint_id::text
-  );
+DELETE FROM webhook_events older
+USING webhook_events newer
+WHERE older.dedupe_key = newer.dedupe_key
+  AND older.id > newer.id;
 
 DROP TABLE IF EXISTS scanner_webhook_config;
+
+-- Per-scope scan leases so multiple replicas do not forward-scan the same scope.
+ALTER TABLE scanner_cursors
+  ADD COLUMN IF NOT EXISTS locked_by text,
+  ADD COLUMN IF NOT EXISTS locked_until timestamptz;
+
+CREATE INDEX IF NOT EXISTS scanner_cursors_locked_until_idx
+  ON scanner_cursors (locked_until)
+  WHERE locked_until IS NOT NULL;

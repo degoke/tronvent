@@ -454,7 +454,7 @@ func TestScannerCursorLeasesEnabled(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !ok {
-		t.Fatal("expected migration 006 lease columns")
+		t.Fatal("expected scanner cursor lease columns")
 	}
 }
 

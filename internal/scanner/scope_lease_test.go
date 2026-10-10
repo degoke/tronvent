@@ -113,7 +113,7 @@ type leasesDisabledDB struct {
 }
 
 func (s *leasesDisabledDB) RequireScannerCursorLeases(context.Context) error {
-	return errors.New("migration 006 required")
+	return errors.New("scanner cursor lease migration required")
 }
 
 func TestPoller_RunStopsWhenLeasesUnavailable(t *testing.T) {

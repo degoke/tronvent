@@ -66,7 +66,7 @@ func main() {
 	defer db.Close()
 
 	if err := db.RequireScannerCursorLeases(ctx); err != nil {
-		slog.Error("scanner requires migration 006 (cursor scope leases)", "err", err)
+		slog.Error("scanner requires cursor scope lease migration (002_webhook_endpoints)", "err", err)
 		os.Exit(1)
 	}
 

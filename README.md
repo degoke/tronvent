@@ -257,7 +257,7 @@ secrets:
 
 See `charts/tronvent/values.yaml` for all configurable values including resource limits, probes, ingress, and Prometheus ServiceMonitor.
 
-You may run multiple replicas (`replicaCount` > 1) when you need more throughput across scopes or API availability. Each forward-scan scope (`TRX`, each TRC-20 contract) holds an exclusive Postgres lease on its `scanner_cursors` row for the duration of a scan (renewed around TronGrid fetches; lost leases abort the scan). Replicas therefore split work across scopes, not duplicate the same scope. Startup reconcile also claims the scope lease before advancing a cursor. Webhook delivery and reconcile jobs use row claiming with `SKIP LOCKED`. Migration `006` is required: the process exits on startup if it is missing, and `/health` returns `503` until the forward poller loop is running (`tron_scanner_poll_loop_ready` on `/metrics`).
+You may run multiple replicas (`replicaCount` > 1) when you need more throughput across scopes or API availability. Each forward-scan scope (`TRX`, each TRC-20 contract) holds an exclusive Postgres lease on its `scanner_cursors` row for the duration of a scan (renewed around TronGrid fetches; lost leases abort the scan). Replicas therefore split work across scopes, not duplicate the same scope. Startup reconcile also claims the scope lease before advancing a cursor. Webhook delivery and reconcile jobs use row claiming with `SKIP LOCKED`. Migration `002_webhook_endpoints` (cursor lease columns) is required: the process exits on startup if it is missing, and `/health` returns `503` until the forward poller loop is running (`tron_scanner_poll_loop_ready` on `/metrics`).
 
 ### Local development
 
@@ -267,7 +267,7 @@ You may run multiple replicas (`replicaCount` > 1) when you need more throughput
 make migrate
 ```
 
-Requires `DATABASE_URL`. Applies all pending files under `migrations/` (tracked in `schema_migrations`). Notable migrations: `002` (webhook endpoints fanout), `003` (direction-specific default `event_types`), `004` (rewrites stored `transaction.trx` / `transaction.trc20` subscriptions to the four supported types), `005` (rewrites outbox `dedupe_key` to include event type and transfer leg), `006` (per-scope scanner cursor leases for multi-replica forward scan).
+Requires `DATABASE_URL`. Applies all pending files under `migrations/` (tracked in `schema_migrations`). Notable migrations: `001` (scanner schema), `002` (webhook endpoint fanout, direction-specific `event_types`, outbox `dedupe_key` shape, per-scope scanner cursor leases).
 
 #### 2. Configure environment
 
