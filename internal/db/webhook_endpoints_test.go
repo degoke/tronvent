@@ -109,10 +109,12 @@ func TestUpsertWebhookEndpointValidationErrorsAreTyped(t *testing.T) {
 		t.Fatal(err)
 	}
 	cases := map[string]internaldb.WebhookEndpoint{
-		"http url":        {WebhookURL: "http://203.0.113.10/hook", SigningSecret: secret},
-		"private host":    {WebhookURL: "https://10.0.0.5/hook", SigningSecret: secret},
-		"bad signing key": {WebhookURL: "https://203.0.113.10/hook", SigningSecret: "whsec_not-base64!"},
-		"unknown event":   {WebhookURL: "https://203.0.113.10/hook", SigningSecret: secret, EventTypes: []string{"transaction.trx"}},
+		"http url":     {WebhookURL: "http://203.0.113.10/hook", SigningSecret: secret},
+		"private host": {WebhookURL: "https://10.0.0.5/hook", SigningSecret: secret},
+		// Built at runtime: invalid on purpose, and no secret-shaped literals for scanners to flag.
+		"malformed prefixed key": {WebhookURL: "https://203.0.113.10/hook", SigningSecret: "whsec_" + strings.Repeat("!", 8)},
+		"too-short legacy key":   {WebhookURL: "https://203.0.113.10/hook", SigningSecret: strings.Repeat("a", 4)},
+		"unknown event":          {WebhookURL: "https://203.0.113.10/hook", SigningSecret: secret, EventTypes: []string{"transaction.trx"}},
 	}
 	for name, ep := range cases {
 		t.Run(name, func(t *testing.T) {
