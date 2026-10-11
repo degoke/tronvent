@@ -20,7 +20,7 @@ func NewDeliveryHTTPClient(timeout time.Duration, policy URLPolicy) *http.Client
 				if err != nil {
 					return nil, err
 				}
-				if err := rejectPrivateHost(host); err != nil {
+				if err := policy.rejectPrivateHost(host); err != nil {
 					return nil, err
 				}
 			}
