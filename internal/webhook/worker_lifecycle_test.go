@@ -3,6 +3,7 @@ package webhook_test
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -22,6 +23,9 @@ type lifecycleDB struct {
 	deactivatedID    string
 	deactivateReason string
 	attemptNumber    int
+	nextAttempt      time.Time
+	lastError        string
+	recordedAttempts []int
 	dbEndpoint       *internaldb.WebhookEndpoint
 }
 
@@ -37,12 +41,15 @@ func (d *lifecycleDB) MarkWebhookEventDelivered(_ context.Context, _ string, _ i
 	return nil
 }
 
-func (d *lifecycleDB) MarkWebhookEventFailed(_ context.Context, _ string, attemptNumber int, _ *int, _ string, _ time.Time, maxAttempts int) error {
+func (d *lifecycleDB) MarkWebhookEventFailed(_ context.Context, _ string, attemptNumber int, _ *int, errMsg string, nextAttempt time.Time, maxAttempts int) error {
 	d.attemptNumber = attemptNumber
+	d.lastError = errMsg
+	d.nextAttempt = nextAttempt
 	return nil
 }
 
-func (d *lifecycleDB) RecordWebhookDeliveryAttempt(_ context.Context, _ string, _ int, _, _ json.RawMessage, _ *int, _, _ string, _ int) error {
+func (d *lifecycleDB) RecordWebhookDeliveryAttempt(_ context.Context, _ string, attemptNumber int, _, _ json.RawMessage, _ *int, _, _ string, _ int) error {
+	d.recordedAttempts = append(d.recordedAttempts, attemptNumber)
 	return nil
 }
 
@@ -218,5 +225,92 @@ func TestWorkerInactiveEndpointMarksDeadWithoutHTTP(t *testing.T) {
 	}
 	if db.attemptNumber != 10 {
 		t.Fatalf("expected dead immediately, attempt=%d", db.attemptNumber)
+	}
+}
+
+// dnsLifecycleDB builds a worker over an endpoint on a public-looking https URL whose DNS answers
+// as given, delivering one event that has already been tried attemptCount times.
+func dnsWorker(t *testing.T, lookup func(string) ([]net.IP, error), url string, attemptCount, maxAttempts int) (*lifecycleDB, *webhook.Worker) {
+	t.Helper()
+	cfgStore := store.NewWebhookConfigStore(nil)
+	cfgStore.UpsertEndpoint(internaldb.WebhookEndpoint{
+		ID: "ep-dns", WebhookURL: url, SigningSecret: testSigningSecret(t), IsActive: true,
+	})
+	payload, _ := json.Marshal(webhookpayload.NewDirectedTransactionEnvelope("TRX", webhookpayload.DirectionReceived, 1710000000000, webhookpayload.TransactionData{ID: "evt-dns", TxHash: "dns"}))
+	db := &lifecycleDB{event: internaldb.WebhookEvent{
+		ID: "evt-dns", EndpointID: "ep-dns", EventType: "TRX", Scope: "TRX", TxHash: "dns",
+		Payload: payload, AttemptCount: attemptCount, CreatedAt: time.Now(),
+	}}
+	policy := webhookspec.URLPolicy{LookupIP: lookup}
+	return db, webhook.NewWorker(&config.Config{WebhookMaxAttempts: maxAttempts}, db, cfgStore, policy)
+}
+
+func TestWorkerDNSFailureBacksOffInsteadOfMarkingDead(t *testing.T) {
+	failures := map[string]func(string) ([]net.IP, error){
+		"NXDOMAIN": func(string) ([]net.IP, error) {
+			return nil, &net.DNSError{Err: "no such host", Name: "hooks.example.com", IsNotFound: true}
+		},
+		"resolver timeout": func(string) ([]net.IP, error) {
+			return nil, &net.DNSError{Err: "i/o timeout", Name: "hooks.example.com", IsTimeout: true}
+		},
+	}
+	for name, lookup := range failures {
+		t.Run(name, func(t *testing.T) {
+			db, worker := dnsWorker(t, lookup, "https://hooks.example.com/hook", 0, 10)
+			before := time.Now()
+			if err := worker.DispatchOnce(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+
+			// A dead event would have used up every attempt at once (attemptNumber == max).
+			if db.attemptNumber != 1 {
+				t.Fatalf("a DNS failure is attempt 1 of 10, got attempt %d (event ended early)", db.attemptNumber)
+			}
+			if !db.nextAttempt.After(before) {
+				t.Fatalf("expected a retry scheduled after %v, got %v", before, db.nextAttempt)
+			}
+			if len(db.recordedAttempts) != 1 || db.recordedAttempts[0] != 1 {
+				t.Fatalf("the attempt must be recorded, got %v", db.recordedAttempts)
+			}
+			if db.lastError == "" {
+				t.Fatal("the failure reason must be kept for the delivery log")
+			}
+			if db.deactivatedID != "" {
+				t.Fatalf("one DNS failure must not disable the endpoint, got %q", db.deactivatedID)
+			}
+		})
+	}
+}
+
+func TestWorkerDNSFailureOnTheLastAttemptDisablesTheEndpoint(t *testing.T) {
+	lookup := func(string) ([]net.IP, error) {
+		return nil, &net.DNSError{Err: "no such host", Name: "hooks.example.com", IsNotFound: true}
+	}
+	db, worker := dnsWorker(t, lookup, "https://hooks.example.com/hook", 1, 2)
+	if err := worker.DispatchOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if db.attemptNumber != 2 {
+		t.Fatalf("expected the final attempt (2), got %d", db.attemptNumber)
+	}
+	if db.deactivatedID != "ep-dns" {
+		t.Fatalf("exhausting the attempts must disable the endpoint and notify its owner, got %q", db.deactivatedID)
+	}
+}
+
+func TestWorkerPolicyViolationStillMarksDead(t *testing.T) {
+	lookup := func(string) ([]net.IP, error) { return []net.IP{net.ParseIP("93.184.216.34")}, nil }
+	// Plain http is not allowed by this policy: retrying can never make it valid.
+	db, worker := dnsWorker(t, lookup, "http://hooks.example.com/hook", 0, 10)
+	if err := worker.DispatchOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if db.attemptNumber != 10 {
+		t.Fatalf("a URL that breaks the policy must end the event at once, got attempt %d", db.attemptNumber)
+	}
+	if len(db.recordedAttempts) != 0 {
+		t.Fatalf("nothing was sent, so no attempt is recorded, got %v", db.recordedAttempts)
 	}
 }

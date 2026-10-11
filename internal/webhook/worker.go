@@ -117,8 +117,12 @@ func (w *Worker) deliverOne(ctx context.Context, ev internaldb.WebhookEvent) err
 		return w.markEventDead(ctx, ev.ID, nil, "webhook endpoint not active")
 	}
 
-	if err := w.urlPolicy.ValidateWebhookURL(endpoint.WebhookURL); err != nil {
-		return w.markEventDead(ctx, ev.ID, nil, err.Error())
+	// A URL that breaks the policy for good (not https, localhost, a private address) ends the
+	// event. A DNS failure does not: the name may resolve again, so it is a failed attempt that
+	// backs off like any other transport error, and only exhausting the attempts ends the event.
+	urlErr := w.urlPolicy.ValidateWebhookURL(endpoint.WebhookURL)
+	if urlErr != nil && !webhookspec.IsRetryableURLError(urlErr) {
+		return w.markEventDead(ctx, ev.ID, nil, urlErr.Error())
 	}
 
 	body := ev.Payload
@@ -132,7 +136,17 @@ func (w *Worker) deliverOne(ctx context.Context, ev internaldb.WebhookEvent) err
 	}
 
 	start := time.Now()
-	statusCode, respBody, resp, deliverErr := w.post(ctx, endpoint.WebhookURL, body, headers)
+	var (
+		statusCode int
+		respBody   string
+		resp       *http.Response
+		deliverErr error
+	)
+	if urlErr != nil {
+		deliverErr = urlErr
+	} else {
+		statusCode, respBody, resp, deliverErr = w.post(ctx, endpoint.WebhookURL, body, headers)
+	}
 	durationMs := int(time.Since(start).Milliseconds())
 
 	headerJSON, _ := json.Marshal(headers)

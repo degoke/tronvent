@@ -98,7 +98,7 @@ If Postgres confirmation fails after retries, or the scan context is cancelled d
 ### Reliability
 
 - **Postgres outbox** — events are persisted before delivery; crashes do not lose matches.
-- **Webhook retries** — [Standard Webhooks](https://www.standardwebhooks.com) delivery schedule (up to 10 attempts over ~75h, with jitter). Every attempt is logged in `webhook_delivery_attempts`.
+- **Webhook retries** — [Standard Webhooks](https://www.standardwebhooks.com) delivery schedule (up to 10 attempts over ~75h, with jitter). Connection errors, including DNS lookup failures for the endpoint host, are retried on the same schedule; only a URL that breaks the policy (not https, localhost, a private address) ends an event immediately. Every attempt is logged in `webhook_delivery_attempts`.
 - **Startup reconciliation** — if the scanner was offline and fell far behind, large gaps are enqueued as background block-range jobs instead of blocking the live poll loop.
 - **Admin replay** — manually re-scan a block or range via the admin API when you need to backfill.
 - **Prometheus metrics** — `/metrics` exposes blocks scanned, matches found, events published, and watchlist size.

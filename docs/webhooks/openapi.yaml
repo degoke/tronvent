@@ -48,9 +48,11 @@ paths:
             Subscriber no longer wants events. Tronvent sets webhook_endpoints.is_active=false
             for that endpoint. Re-enable via PATCH /api/v1/webhook/endpoints/{id} (isActive true).
         '4xx':
-          description: Event marked dead immediately; endpoint stays active (except 410).
+          description: An HTTP 4xx response marks the event dead immediately; endpoint stays active (except 410).
         '5xx':
-          description: Retried per Standard Webhooks schedule until WEBHOOK_MAX_ATTEMPTS (default 10), then event is dead and endpoint may be disabled.
+          description: |
+            Retried per Standard Webhooks schedule until WEBHOOK_MAX_ATTEMPTS (default 10), then event is dead and endpoint may be disabled.
+            Connection errors are retried the same way, including DNS failures for the endpoint host (a name that does not resolve, or a resolver error): the name may resolve again, so these never end an event on the first attempt.
 
 components:
   schemas:
